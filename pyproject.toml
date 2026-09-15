@@ -1,0 +1,33 @@
+[project]
+name = "davinci-resolve-mcp"
+version = "0.1.0"
+description = "MCP server for controlling and automating DaVinci Resolve workflows through structured tools."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Hitesh Kandala" },
+]
+
+dependencies = [
+    "mcp==1.28.1",
+]
+
+[project.optional-dependencies]
+transcription = [
+    "faster-whisper==1.2.1",
+]
+audio = [
+    "demucs==4.1.0",
+    "soundfile==0.14.0",
+]
+background-removal = [
+    "rembg[cpu]==2.0.76",
+]
+
+[project.urls]
+Upstream = "https://github.com/hiteshK03/davinci-resolve-mcp"
+Repository = "https://github.com/kerwilgil/davinci-resolve-mcp"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
