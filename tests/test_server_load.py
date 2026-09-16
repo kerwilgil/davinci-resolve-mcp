@@ -45,7 +45,13 @@ class ArchitectureTests(unittest.TestCase):
         import os
         bridge_path = os.path.join(os.path.dirname(__file__), "..", "src", "CursorBridge.py")
         if os.path.exists(bridge_path):
-            bridge_text = open(bridge_path, encoding="utf-8").read()
+            # File may have UTF-16 BOM
+            with open(bridge_path, "rb") as f:
+                raw = f.read()
+            if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+                bridge_text = raw.decode("utf-16")
+            else:
+                bridge_text = raw.decode("utf-8")
             self.assertIn('HOST = "127.0.0.1"', bridge_text)
 
 
