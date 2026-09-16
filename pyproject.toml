@@ -1,0 +1,43 @@
+[project]
+name = "davinci-resolve-mcp"
+version = "1.0.0"
+description = "A local-first Model Context Protocol server for structured DaVinci Resolve automation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Kerwil Gil", email = "kerwil.gil@up.ac.pa" }
+]
+
+dependencies = [
+    "mcp==1.28.1",
+]
+
+[project.optional-dependencies]
+transcription = [
+    "faster-whisper==1.2.1",
+]
+audio = [
+    "demucs==4.1.0",
+    "soundfile==0.14.0",
+]
+background-removal = [
+    "rembg[cpu]==2.0.76",
+]
+
+[project.urls]
+Repository = "https://github.com/kerwilgil/davinci-resolve-mcp"
+Issues = "https://github.com/kerwilgil/davinci-resolve-mcp/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = ["E", "F", "I", "UP", "W"]
+ignore = ["E501", "UP007"]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
