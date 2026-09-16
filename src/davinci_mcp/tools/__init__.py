@@ -4,6 +4,8 @@ Tools package for DaVinci Resolve MCP.
 Provides tool implementations organized by Resolve domain.
 """
 
+from collections.abc import Callable
+
 from ..schemas import (
     ToolCategory,
     ToolMode,
@@ -23,7 +25,7 @@ class ToolRegistry:
     def __init__(self, client: BridgeClient, read_only: bool = False):
         self.client = client
         self.read_only = read_only
-        self._handlers: dict[str, callable] = {}
+        self._handlers: dict[str, Callable[..., ToolResult]] = {}
         self._register_all_tools()
 
     def _register_all_tools(self) -> None:
@@ -49,11 +51,11 @@ class ToolRegistry:
         register_render_tools(self)
         register_gallery_tools(self)
 
-    def register(self, name: str, handler: callable) -> None:
+    def register(self, name: str, handler: Callable[..., ToolResult]) -> None:
         """Register a tool handler."""
         self._handlers[name] = handler
 
-    def get_handler(self, name: str) -> callable | None:
+    def get_handler(self, name: str) -> Callable[..., ToolResult] | None:
         """Get a tool handler by name."""
         return self._handlers.get(name)
 
