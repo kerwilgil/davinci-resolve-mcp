@@ -13,8 +13,8 @@ param(
 .DESCRIPTION
     This script assumes it is being run from a checkout of this repository
     (davinci-resolve-mcp). It does not clone anything from the network --
-    the server source (src/resolve_mcp_bridge.py, src/CursorBridge.py) is
-    vendored in this repo at the commit recorded in manifests/tool-manifest.json.
+    the server source (src/davinci_mcp/server.py, src/CursorBridge.py) is
+    part of this repo.
 
     Steps:
       1. Creates a Python 3.11 virtual environment under $InstallDir.
@@ -29,7 +29,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LockFile = Join-Path $RepoRoot "requirements.lock"
 $AutostartSource = Join-Path $RepoRoot "scripts\autostart.py"
-$ServerSource = Join-Path $RepoRoot "src\resolve_mcp_bridge.py"
+$ServerSource = Join-Path $RepoRoot "src\davinci_mcp\server.py"
 $BridgeSource = Join-Path $RepoRoot "src\CursorBridge.py"
 $UtilityDir = Join-Path $env:APPDATA "Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility"
 $StartDir = Join-Path $env:APPDATA "Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Start"
