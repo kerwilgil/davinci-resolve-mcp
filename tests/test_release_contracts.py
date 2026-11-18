@@ -107,7 +107,8 @@ class ResolveContracts(unittest.TestCase):
         self.timeline.GetEndFrame.return_value = 200000
         for rate, initial, minute, ten, skipped in (
                 ("29.97", "01:00:00;00", 1800, 17982, 2),
-                ("59.94", "01:00:00;00", 3600, 35964, 4)):
+                ("29.97 DF", "01:00:00:00", 1800, 17982, 2),
+                ("59.94 DF", "01:00:00:00", 3600, 35964, 4)):
             self.timeline.GetSetting.side_effect = {"timelineFrameRate": rate}.get
             self.timeline.GetStartTimecode.return_value = initial
             self.assertEqual(self.bridge._timeline_timecode(self.timeline, minute - 1),
@@ -133,7 +134,10 @@ class ResolveContracts(unittest.TestCase):
             self.assertTrue(self.tool("import_media", file_paths=[str(source)], folder_path="Test").success)
             pool.ImportMedia.assert_called_once_with([str(source)])
             self.assertEqual(pool.SetCurrentFolder.call_args_list, [call(folder), call(original)])
-            self.assertFalse(self.tool("import_media", file_paths=[str(source)], folder_path="Missing").success)
+            for target in ("Missing", "//"):
+                result = self.tool("import_media", file_paths=[str(source)], folder_path=target)
+                self.assertFalse(result.success)
+                self.assertNotEqual(result.error.code, "BRIDGE_OUTCOME_UNKNOWN")
             self.assertEqual(pool.ImportMedia.call_count, 1)
 
     def test_clip_list_mutations_resolve_every_target(self):

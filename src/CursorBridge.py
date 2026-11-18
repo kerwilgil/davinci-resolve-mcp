@@ -185,6 +185,8 @@ def _find_folder_by_path(pool, path):
     if not path or path.lower() in ("root", "/", ""):
         return root
     parts = [part for part in path.split("/") if part]
+    if not parts:
+        return None
     if parts[0].lower() in ("root", "master"):
         parts = parts[1:]
     current = root
@@ -683,7 +685,11 @@ def _timeline_timecode(timeline, frame):
     """Convert an offset from the first timeline frame to SMPTE timecode."""
     if type(frame) is not int or not 0 <= frame <= timeline.GetEndFrame() - timeline.GetStartFrame():
         raise ValueError("Frame is outside the current timeline")
-    rate_text = str(timeline.GetSetting("timelineFrameRate")).strip()
+    rate_text = str(timeline.GetSetting("timelineFrameRate")).strip().upper()
+    # Resolve may encode drop-frame in the configured rate, e.g. "29.97 DF".
+    drop_rate = rate_text.endswith(" DF")
+    if drop_rate:
+        rate_text = rate_text[:-3].strip()
     rates = {"23.976": "24000/1001", "23.98": "24000/1001", "29.97": "30000/1001",
              "47.952": "48000/1001", "59.94": "60000/1001", "119.88": "120000/1001"}
     rate = Fraction(rates.get(rate_text, rate_text))
@@ -697,7 +703,7 @@ def _timeline_timecode(timeline, frame):
     hours, minutes, seconds, separator, frames = match.groups()
     hours, minutes, seconds, frames = map(int, (hours, minutes, seconds, frames))
     drop_setting = str(timeline.GetSetting("timelineDropFrameTimecode")).lower()
-    drop = separator == ";" or drop_setting in ("1", "true")
+    drop = drop_rate or separator == ";" or drop_setting in ("1", "true")
     skipped = {30: 2, 60: 4}.get(fps) if drop else 0
     if skipped is None or (drop and rate != Fraction(fps * 1000, 1001)):
         raise ValueError("Unsupported drop-frame rate")
