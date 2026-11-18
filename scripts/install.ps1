@@ -46,8 +46,8 @@ foreach ($Path in @($LockFile, $ServerSource, $BridgeSource)) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing $Path" }
 }
 
-$InstallFull = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
-$InstallRoot = [IO.Path]::GetPathRoot($InstallFull).TrimEnd('\', '/')
+$InstallFull = [IO.Path]::GetFullPath($InstallDir).TrimEnd([char[]]'\/')
+$InstallRoot = [IO.Path]::GetPathRoot($InstallFull).TrimEnd([char[]]'\/')
 if (-not $InstallFull -or $InstallFull -eq $InstallRoot) { throw "Unsafe InstallDir: $InstallFull" }
 
 $ExistingMcp = $false
