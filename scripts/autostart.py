@@ -63,7 +63,9 @@ if _utility_dir not in sys.path:
 # ---------------------------------------------------------------------------
 def _run_cursor_bridge():
     try:
-        import CursorBridge  # noqa -- runs the whole module, including serve_forever()
+        import CursorBridge
+        CursorBridge._init_resolve()
+        CursorBridge.serve()
     except ImportError:
         print("[autostart] CursorBridge.py not found in: %s" % _utility_dir)
         print("[autostart] Make sure CursorBridge.py is in Scripts/Utility/")

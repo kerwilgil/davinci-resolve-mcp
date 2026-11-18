@@ -10,8 +10,16 @@ authors = [
 ]
 
 dependencies = [
-    "mcp==1.28.1",
+    "mcp==1.30.0",
+    "jsonschema==4.26.0",
 ]
+
+[project.scripts]
+davinci-resolve-mcp = "davinci_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["davinci_mcp*"]
 
 [project.optional-dependencies]
 transcription = [
@@ -35,8 +43,9 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-select = ["E", "F", "I", "UP", "W"]
-ignore = ["E501", "UP007"]
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

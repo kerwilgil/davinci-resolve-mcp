@@ -1,5 +1,5 @@
 {
-  "server_entrypoint": "src/davinci_mcp/server.py",
+  "server_entrypoint": "davinci-resolve-mcp",
   "verified_tools": [
     "get_resolve_status",
     "get_project_info",
@@ -336,5 +336,8 @@
       "delete_stills",
       "set_still_label"
     ]
-  }
+  },
+  "server_module": "davinci_mcp.server",
+  "verification_status": "PENDING",
+  "verification_note": "verified_tools is a legacy declaration list, not evidence of physical Resolve validation. See RELEASE_VALIDATION.md."
 }

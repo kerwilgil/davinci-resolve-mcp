@@ -3,7 +3,6 @@ DaVinci Resolve MCP - A local-first Model Context Protocol server
 for structured DaVinci Resolve automation.
 """
 
-from .server import DaVinciMCPServer, create_server, main
 from .config import ServerConfig, BridgeConfig, get_server_config, get_bridge_config
 from .schemas import (
     ToolSchema,
@@ -49,3 +48,10 @@ __all__ = [
     "BridgeConnectionError",
     "ToolExecutionError",
 ]
+
+def __getattr__(name):
+    # Preserve public imports without preloading the module used by python -m.
+    if name in {"DaVinciMCPServer", "create_server", "main"}:
+        from . import server
+        return getattr(server, name)
+    raise AttributeError(name)

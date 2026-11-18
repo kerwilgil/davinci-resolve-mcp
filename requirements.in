@@ -1,6 +1,3 @@
-# Pinned dependencies for davinci-resolve-mcp at the vendored commit (see manifests/tool-manifest.json).
-mcp==1.28.1
-faster-whisper==1.2.1
-demucs==4.1.0
-rembg[cpu]==2.0.76
-soundfile==0.14.0
+# Core runtime; optional ML extras are not required by the bridge.
+mcp==1.30.0
+jsonschema==4.26.0

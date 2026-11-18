@@ -10,7 +10,11 @@ import logging
 import sys
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+import json
+
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import CallToolResult, TextContent, Tool
 
 from .config import ServerConfig, get_server_config, get_bridge_config
 from .bridge import BridgeClient
@@ -33,7 +37,7 @@ class DaVinciMCPServer:
         self.bridge_config = bridge_config or get_bridge_config()
         self.read_only = read_only
 
-        self.mcp = FastMCP(self.server_config.name)
+        self.mcp = Server(self.server_config.name, version=self.server_config.version)
         self.bridge_client = BridgeClient(self.bridge_config)
         self.tool_registry = ToolRegistry(self.bridge_client, read_only=read_only)
 
@@ -41,25 +45,25 @@ class DaVinciMCPServer:
 
     def _register_mcp_tools(self) -> None:
         """Register all tools with the MCP server."""
-        for tool_name in self.tool_registry.list_tools():
-            schema = self.tool_registry._handlers.get(tool_name)
-            if schema:
-                self._register_tool(tool_name)
+        from .schemas import get_schema
 
-    def _register_tool(self, name: str) -> None:
-        """Register a single tool with the MCP server."""
-        handler = self.tool_registry.get_handler(name)
+        @self.mcp.list_tools()
+        async def list_tools():
+            return [
+                Tool(name=name, description=get_schema(name).description,
+                     inputSchema={**get_schema(name).parameters,
+                                  "required": get_schema(name).required})
+                for name in self.tool_registry.list_tools()
+            ]
 
-        @self.mcp.tool(name=name)
-        async def tool_wrapper(**kwargs) -> dict:
-            # Add registry reference for handler
-            kwargs["_registry"] = self.tool_registry
-            result = await self.tool_registry.execute(name, kwargs)
-            if result.success:
-                return result.data
-            else:
-                # Return structured error for MCP
-                return result.error.to_dict() if result.error else {"error": "Unknown error"}
+        @self.mcp.call_tool()
+        async def call_tool(name, arguments):
+            result = await self.tool_registry.execute(name, arguments or {})
+            data = result.data if result.success else result.error.to_dict()
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(data))],
+                isError=not result.success,
+            )
 
     def get_tool_list(self) -> list[str]:
         """Get list of all registered tools."""
@@ -125,7 +129,14 @@ def main() -> None:
     server = create_server()
 
     # Run the MCP server (this blocks)
-    server.mcp.run()
+    async def run():
+        async with stdio_server() as (read_stream, write_stream):
+            try:
+                await server.mcp.run(read_stream, write_stream, server.mcp.create_initialization_options())
+            finally:
+                await server.close()
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

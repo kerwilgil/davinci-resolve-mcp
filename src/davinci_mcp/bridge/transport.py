@@ -7,6 +7,8 @@ import time
 import uuid
 from typing import Any, Optional
 from urllib import request, error
+from urllib.parse import urlencode
+from http.client import HTTPException
 from dataclasses import dataclass
 
 from ..config import BridgeConfig
@@ -37,13 +39,18 @@ class TransportStats:
         return self.total_latency_ms / self.requests_made if self.requests_made > 0 else 0.0
 
 
+class NoRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class HTTPTransport:
     """HTTP transport for bridge communication."""
 
     def __init__(self, config: Optional[BridgeConfig] = None):
         self.config = config or BridgeConfig()
         self.stats = TransportStats()
-        self._opener = request.build_opener()
+        self._opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
 
     def send(self, bridge_request: BridgeRequest) -> BridgeResponse:
         """Send a request to the bridge and return the response."""
@@ -52,7 +59,7 @@ class HTTPTransport:
 
         # Prepare request data
         if bridge_request.method == BridgeMethod.GET and bridge_request.params:
-            query_string = "&".join(f"{k}={v}" for k, v in bridge_request.params.items())
+            query_string = urlencode(bridge_request.params)
             url = f"{url}?{query_string}"
             data = None
         else:
@@ -69,6 +76,7 @@ class HTTPTransport:
             method=bridge_request.method.value,
             headers={
                 "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.token}",
                 "X-Request-ID": request_id,
                 "User-Agent": "davinci-mcp/1.0.0",
             },
@@ -77,7 +85,8 @@ class HTTPTransport:
         start_time = time.perf_counter()
         last_exception: Optional[Exception] = None
 
-        for attempt in range(self.config.max_retries + 1):
+        retries = self.config.max_retries if bridge_request.method == BridgeMethod.GET else 0
+        for attempt in range(retries + 1):
             try:
                 with self._opener.open(req, timeout=self.config.timeout) as resp:
                     response_data = resp.read()
@@ -113,7 +122,7 @@ class HTTPTransport:
                 self.stats.record_request(latency_ms, False)
 
                 # Don't retry client errors (4xx)
-                if 400 <= e.code < 500:
+                if e.code < 500 or bridge_request.method != BridgeMethod.GET:
                     return bridge_response
 
                 last_exception = BridgeResponseError(
@@ -125,12 +134,14 @@ class HTTPTransport:
             except error.URLError as e:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 self.stats.record_request(latency_ms, False)
-                last_exception = BridgeConnectionError(
-                    f"Failed to connect to bridge: {e}",
-                    host=self.config.host,
-                    port=self.config.port,
-                    original_error=e,
-                )
+                if isinstance(e.reason, TimeoutError):
+                    last_exception = BridgeTimeoutError(timeout=self.config.timeout, endpoint=bridge_request.path)
+                else:
+                    last_exception = BridgeConnectionError(
+                        "Failed to connect to bridge",
+                        host=self.config.host,
+                        port=self.config.port,
+                    )
 
             except TimeoutError as e:
                 latency_ms = (time.perf_counter() - start_time) * 1000
@@ -141,9 +152,17 @@ class HTTPTransport:
                     endpoint=bridge_request.path,
                 )
 
+            except (OSError, HTTPException):
+                self.stats.record_request((time.perf_counter() - start_time) * 1000, False)
+                last_exception = BridgeConnectionError("Bridge connection interrupted")
+
             # Wait before retry (except on last attempt)
-            if attempt < self.config.max_retries:
+            if attempt < retries:
                 time.sleep(self.config.retry_delay * (attempt + 1))
+
+        if bridge_request.method != BridgeMethod.GET:
+            from ..errors import BridgeOutcomeUnknownError
+            raise BridgeOutcomeUnknownError() from None
 
         # All retries exhausted
         raise last_exception or BridgeConnectionError(

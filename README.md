@@ -1,332 +1,170 @@
 # DaVinci Resolve MCP
 
-A local-first Model Context Protocol server for structured DaVinci Resolve
-automation.
+A local MCP server for DaVinci Resolve automation. MIT licensed.
 
-## Overview
+**Release candidate 1.0.0 — BLOCKED.** Installation and protocol tests are
+separate from real Resolve compatibility. See [validation evidence and remaining
+blockers](RELEASE_VALIDATION.md) before using this with valuable projects.
 
-This project provides a native MCP (Model Context Protocol) server that enables
-structured automation of DaVinci Resolve through typed tools. Any MCP-compatible
-client (Claude Code, Cursor, or custom clients) can drive DaVinci Resolve
-programmatically: read project and timeline state, build and edit timelines,
-manage the media pool, move clips, apply color operations, run renders, and
-more — all through a typed tool interface instead of screen automation.
-
-## Features
-
-- **Native MCP interface** — structured tools for MCP-compatible clients.
-- **Timeline automation** — create, inspect and modify timelines.
-- **Media operations** — import and manage media and clips.
-- **Project introspection** — structured project and timeline state.
-- **Typed tool registry** — deterministic schemas and tool metadata.
-- **Read/write separation** — explicit distinction between inspection and mutation.
-- **Local-first bridge** — communication restricted to the local Resolve instance.
-- **Structured errors** — predictable failures instead of opaque exceptions.
-- **Automated validation** — registry, schemas and contracts covered by CI.
-- **Extensible architecture** — tools grouped by Resolve domain instead of one monolithic bridge.
-
-## Architecture
-
-```
-MCP client (Claude Code, Cursor, ...)
-        | stdio, MCP tool calls
-        v
-src/davinci_mcp/server.py     (MCP server process; runs on your machine)
-        | HTTP, localhost only
-        v
-src/CursorBridge.py           (runs inside DaVinci Resolve's Fusion console)
-        |
-        v
-DaVinci Resolve project / timeline / media pool
-```
-
-The MCP server (`src/davinci_mcp/server.py`) never talks to DaVinci Resolve
-directly — it only ever calls `http://127.0.0.1:9876`, where `CursorBridge.py`
-is listening. If DaVinci Resolve is closed or the bridge script isn't running,
-every tool call returns a structured connection error instead of hanging or
-crashing.
-
-## Requirements
-
-- DaVinci Resolve 18 or later (Free or Studio; a handful of tools such as
-  `smart_reframe_clip` and stabilization require Studio).
-- Python 3.11+.
-- [`uv`](https://github.com/astral-sh/uv) for locked, hash-verified
-  dependency installs.
-- An MCP-compatible client (e.g. Claude Code: `claude mcp add`).
-- FFmpeg on `PATH` for transcription/scene-detection tools.
+The MCP client communicates over stdio with the installed Python package, which
+sends authenticated HTTP requests to `CursorBridge.py` inside Resolve. The bridge
+binds only to `127.0.0.1:9876`. It never starts merely because it was imported.
 
 ## Installation
 
-From a checkout of this repository, on Windows:
+Python 3.11+ and an MCP client are required. The CI exercises Python 3.11 and 3.13
+on Windows, macOS and Linux; this does not certify those platforms with Resolve.
+Resolve's installed Python interpreter must support Python 3 syntax. Its exact
+version and the Free/Studio feature matrix are still pending physical validation.
+
+From a checkout, create an isolated environment and install the locked core:
+
+```bash
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python --require-hashes -r requirements.lock
+uv pip install --python .venv/bin/python --no-deps .
+```
+
+Those are the macOS/Linux package commands. On Windows the interpreter path is
+`.venv\Scripts\python.exe`. Always install the package; executing the source file
+`src/davinci_mcp/server.py` directly does not support its relative imports.
+
+Launch either the installed `davinci-resolve-mcp` command or:
+
+```bash
+/path/to/.venv/bin/python -m davinci_mcp.server
+```
+
+The server uses stdio; its logs go to stderr. For Claude Code:
+
+```bash
+claude mcp add --scope user --transport stdio davinci-resolve -- /absolute/path/to/.venv/bin/python -m davinci_mcp.server
+```
+
+See [examples/mcp.json](examples/mcp.json) for a generic client configuration.
+No PyPI package or validated installer binary has been published.
+
+### Windows helper
+
+From a checkout, with `uv` and `claude` on PATH:
 
 ```powershell
 .\scripts\install.ps1
+# Upgrade an existing installation, preserving backups:
+.\scripts\install.ps1 -Force
+# Preview without writing:
+.\scripts\install.ps1 -WhatIf
 ```
 
-This creates a locked Python 3.11 virtual environment, installs dependencies
-from `requirements.lock` with hash verification, copies and SHA-256-verifies
-`src/CursorBridge.py` into DaVinci Resolve's `Scripts/Utility` folder, and
-registers the server with Claude Code via `claude mcp add`.
+The helper installs the package into `%LOCALAPPDATA%\davinci-resolve-mcp`, copies
+and hash-verifies the bridge in Resolve's Scripts/Utility folder, and registers
+`python -m davinci_mcp.server` in Claude's **user** scope. Existing server env and
+other options are retained. Previous environments and bridges are backed up.
+Failure restores the previous environment, bridge, startup files and the exact
+user MCP configuration bytes. Do not edit Claude's configuration concurrently
+with installation. Project/local Claude registrations are not overwritten; an
+existing conflicting registration must be resolved by the user.
 
-Add `-EnableAutostart` to also install `scripts/autostart.py` into DaVinci
-Resolve's `Scripts/Start` folder (off by default — see Security). Use
-`-Force` to back up and replace an existing installation. `-WhatIf` previews
-the operation without applying it.
+`-EnableAutostart` opts into a dedicated `davinci_mcp_autostart.py` startup file;
+it does not overwrite an unrelated `autostart.py`. Without this flag an existing
+startup opt-in is retained. Autostart and the real Claude CLI integration remain
+pending physical verification; CI uses a controlled CLI stub.
 
-On macOS/Linux, install manually: create a virtual environment, `uv pip
-install --require-hashes --requirements requirements.lock`, then register
-`src/davinci_mcp/server.py` with your MCP client. `CursorBridge.py` still
-needs to run inside DaVinci Resolve's own Scripts folder for your platform.
+## Configure authentication and start the bridge
 
-## Configuration
-
-Point any MCP client at `src/davinci_mcp/server.py` with the environment's
-Python interpreter. For Claude Code:
+Generate a fresh secret locally, without committing it:
 
 ```bash
-claude mcp add davinci-resolve -- python /path/to/src/davinci_mcp/server.py
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Environment variables (all optional):
+Set `DAVINCI_BRIDGE_TOKEN` to this same value in **both** the Resolve process and
+the MCP server process. It must be ASCII and at least 32 characters long. The
+bridge fails closed without it. Prefer passing it through each application's
+launch environment. A GUI application started from Finder or the Start menu may
+not inherit a terminal's environment. Client configuration files containing a
+token must remain private and must not be committed.
 
-| Variable | Default | Description |
+For a manual Resolve session, set `os.environ["DAVINCI_BRIDGE_TOKEN"]` to your
+secret in Resolve's Python console, then run the copied `CursorBridge.py` from
+Workspace > Scripts. This integration procedure is **PENDING** on real Resolve.
+On Windows the helper copies the script. On macOS manually copy it to the
+Scripts/Utility directory used by your Resolve installation; directory discovery
+and GUI startup have not been validated here.
+
+The bridge uses port 9876. Restarting it does not automatically shut down another
+instance. Close Resolve or use an authorized `/bridge/shutdown` request to stop
+an old authenticated instance. Do not leave the old unauthenticated bridge running
+when upgrading; replace it and restart Resolve before using the new MCP client.
+
+| MCP environment variable | Default | Meaning |
 |---|---|---|
-| `DAVINCI_BRIDGE_HOST` | `127.0.0.1` | Bridge host |
-| `DAVINCI_BRIDGE_PORT` | `9876` | Bridge port |
-| `DAVINCI_BRIDGE_TIMEOUT` | `30.0` | Request timeout (seconds) |
-| `DAVINCI_BRIDGE_MAX_RETRIES` | `3` | Max retries for failed requests |
-| `DAVINCI_BRIDGE_RETRY_DELAY` | `1.0` | Base retry delay (seconds) |
-| `DAVINCI_MCP_NAME` | `davinci-resolve` | MCP server name |
+| `DAVINCI_BRIDGE_TOKEN` | none | Shared bearer credential; required by bridge |
+| `DAVINCI_BRIDGE_HOST` | `127.0.0.1` | Only `127.0.0.1` or `localhost` accepted |
+| `DAVINCI_BRIDGE_PORT` | `9876` | Client target port; bridge uses 9876 |
+| `DAVINCI_BRIDGE_TIMEOUT` | `30.0` | Seconds per request |
+| `DAVINCI_BRIDGE_MAX_RETRIES` | `3` | GET retries only; POST is sent once |
+| `DAVINCI_BRIDGE_RETRY_DELAY` | `1.0` | GET retry backoff base, seconds |
+| `DAVINCI_MCP_NAME` | `davinci-resolve` | Server name |
 | `DAVINCI_MCP_VERSION` | `1.0.0` | MCP server version |
-| `DAVINCI_MCP_DESCRIPTION` | `DaVinci Resolve MCP server...` | Server description |
+| `DAVINCI_MCP_DESCRIPTION` | package description | Server description |
 
-## Running the Bridge
+Bridge version `2.0.0` identifies its existing HTTP API, independently of package
+version `1.0.0`.
 
-Start `src/CursorBridge.py` inside DaVinci Resolve:
+## Tool support and errors
 
-1. Open DaVinci Resolve
-2. Go to **Workspace → Scripts → CursorBridge**
-3. The bridge will start listening on `http://127.0.0.1:9876`
+There are 162 declared tools across nine domains. MCP discovery exposes their
+real properties and required arguments; the registry validates JSON Schema,
+including nested values, patterns, enums and bounds. Registration, schema presence
+and endpoint coverage do **not** prove a Resolve operation works. The manifest's
+historical `verified_tools` field is a declaration list, not physical test evidence.
+Its `verification_status` remains `PENDING`.
 
-Or enable autostart during installation (`-EnableAutostart`) to have the bridge
-start automatically when Resolve launches.
+Seven declared tools have no bridge implementation and return `TOOL_UNAVAILABLE`:
+`voice_isolate`, `voice_isolate_timeline`, `remove_background`,
+`remove_background_video`, `remove_background_clip`, `transcribe_timeline` and
+`transcribe_file`. Installing optional ML extras does not implement them. The
+core installation does not install those extras.
 
-## Available Tools
+Other unresolved argument/endpoint semantic gaps are listed in the validation
+report. Use only disposable projects until they are closed. Named project and
+timeline scopes must match the current context; they do not implicitly switch
+projects. Timeline clip names must resolve uniquely; ambiguous/missing names are
+rejected before mutation.
 
-The server exposes 162 tools across 9 categories. See `manifests/tool-manifest.json`
-for the complete list of verified tools.
+Every HTTP route requires authentication, including reads, exports, deletion and
+shutdown. Browser origins and non-local Host headers are rejected; CORS is disabled.
+Requests are bounded, proxy use and redirects are disabled, and internal failures
+do not return paths or tracebacks. The token grants local read/write authority; it
+does not protect against malicious software already running as your OS user.
 
-### Project (29 tools)
-`get_resolve_status`, `get_project_info`, `get_current_page`, `open_page`,
-`save_project`, `set_project_setting`, `set_timeline_setting`,
-`export_current_frame`, `create_subtitles_from_audio`, `detect_scene_cuts`,
-`get_project_list`, `get_database_list`, `load_project`, `create_project`,
-`delete_project`, `archive_project`, `export_project`, `import_project`,
-`navigate_project_folder`, `set_database`, `layout_preset`, `render_preset`,
-`burnin_preset`, `get_keyframe_mode`, `set_keyframe_mode`, `refresh_lut_list`,
-`get_media_storage`, `reveal_in_storage`, `voice_isolate`, `voice_isolate_timeline`,
-`remove_background`, `remove_background_video`, `remove_background_clip`,
-`transcribe_timeline`, `transcribe_file`
+POST communication failures return `BRIDGE_OUTCOME_UNKNOWN`: inspect Resolve
+before trying again. The operation may already have executed. HTTP errors are
+returned without replaying POST. Only read-only GET requests have bounded retries.
 
-### Timeline (27 tools)
-`get_timeline_info`, `get_timeline_clips`, `get_timeline_markers`,
-`set_playhead`, `add_marker`, `delete_markers`, `switch_timeline`,
-`create_timeline`, `rename_timeline`, `duplicate_timeline`, `export_timeline`,
-`set_timeline_mark_in_out`, `clear_timeline_mark_in_out`,
-`delete_timeline_clips`, `link_timeline_clips`, `create_compound_clip`,
-`create_fusion_clip`, `add_track`, `delete_track`, `set_track_enable`,
-`set_track_lock`, `set_track_name`
-
-### Media (16 tools)
-`get_media_pool`, `get_media_pool_structure`, `navigate_media_pool`,
-`create_media_pool_folder`, `import_media`, `get_clip_metadata`,
-`set_clip_metadata`, `get_clip_info`, `set_pool_clip_property`,
-`delete_media_pool_clips`, `move_media_pool_clips`, `relink_media_pool_clips`,
-`unlink_media_pool_clips`, `auto_sync_audio`, `import_timeline_from_file`,
-`export_metadata`, `import_media_from_storage`
-
-### Clips (8 tools)
-`add_clip_marker`, `get_clip_markers`, `delete_clip_markers`,
-`add_clip_flag`, `get_clip_flags`, `clear_clip_flags`,
-`get_clip_thumbnail`, `get_current_video_item`
-
-### Color (23 tools)
-`get_node_graph`, `set_lut`, `get_lut`, `set_node_enabled`,
-`apply_grade_from_drx`, `reset_all_grades`, `apply_arri_cdl_lut`,
-`set_cdl`, `export_lut`, `copy_grades`, `reset_node_colors`,
-`get_color_versions`, `add_color_version`, `load_color_version`,
-`delete_color_version`, `rename_color_version`, `get_color_groups`,
-`add_color_group`, `delete_color_group`, `assign_to_color_group`,
-`remove_from_color_group`
-
-### Fusion (10 tools)
-`get_fusion_comps`, `add_fusion_comp_to_clip`, `import_fusion_comp_to_clip`,
-`export_fusion_comp_from_clip`, `delete_fusion_comp_on_clip`,
-`load_fusion_comp_on_clip`, `rename_fusion_comp_on_clip`,
-`create_magic_mask`, `regenerate_magic_mask`, `stabilize_clip`,
-`smart_reframe_clip`
-
-### Audio (16 tools)
-`get_fairlight_presets`, `apply_fairlight_preset`, `insert_audio_at_playhead`,
-`get_voice_isolation_state`, `set_voice_isolation_state`, `get_takes`,
-`add_take`, `select_take`, `delete_take`, `finalize_take`,
-`link_proxy_media`, `unlink_proxy_media`, `replace_clip`, `set_clip_cache`,
-`update_sidecar`, `get_linked_items`
-
-### Render (11 tools)
-`get_render_settings`, `set_render_settings`, `set_render_format`,
-`get_render_formats`, `add_render_job`, `start_rendering`, `stop_rendering`,
-`delete_render_job`, `get_render_job_status`, `get_render_resolutions`,
-`get_quick_export_presets`, `quick_export`, `set_render_mode`
-
-### Gallery (10 tools)
-`get_gallery_albums`, `get_album_stills`, `set_current_album`,
-`create_gallery_album`, `grab_still`, `grab_all_stills`, `export_stills`,
-`import_stills`, `delete_stills`, `set_still_label`
-
-## Examples
-
-### Create a timeline and add clips
-
-```python
-# Via MCP tool calls
-create_timeline(name="My Timeline", frame_rate=24)
-insert_to_timeline(clip_name="clip1.mp4", track_type="video", track_index=1)
-insert_to_timeline(clip_name="audio.wav", track_type="audio", track_index=1)
-```
-
-### Render a timeline
-
-```python
-add_render_job(preset="H.264 Master", output_path="/renders/out.mp4")
-start_rendering(wait_for_completion=true)
-```
-
-### Color grading
-
-```python
-set_lut(clip_name="clip1", node_index=1, lut_path="/luts/film.cube")
-set_cdl(clip_name="clip1", node_index=2,
-        slope=[1.1, 1.0, 0.9],
-        offset=[0.02, 0.0, -0.01],
-        power=[0.95, 1.0, 1.05],
-        saturation=1.1)
-```
-
-## Development
-
-### Project Structure
-
-```
-src/davinci_mcp/
-├── __init__.py          # Package exports
-├── server.py            # MCP server entry point
-├── config.py            # Configuration
-├── errors.py            # Structured error types
-├── bridge/
-│   ├── __init__.py      # Bridge exports
-│   ├── protocol.py      # HTTP protocol definitions
-│   ├── transport.py     # HTTP transport layer
-│   └── client.py        # High-level bridge client
-├── schemas/
-│   ├── __init__.py      # Schema registry
-│   ├── common.py        # Common definitions
-│   ├── timeline.py      # Timeline tool schemas
-│   ├── media.py         # Media pool tool schemas
-│   ├── clips.py         # Clip tool schemas
-│   ├── color.py         # Color tool schemas
-│   ├── fusion.py        # Fusion tool schemas
-│   ├── audio.py         # Audio tool schemas
-│   ├── render.py        # Render tool schemas
-│   ├── gallery.py       # Gallery tool schemas
-│   └── project.py       # Project tool schemas
-└── tools/
-    ├── __init__.py      # Tool registry & base
-    ├── project.py       # Project tool implementations
-    ├── timeline.py      # Timeline tool implementations
-    ├── media.py         # Media tool implementations
-    ├── clips.py         # Clips tool implementations
-    ├── color.py         # Color tool implementations
-    ├── fusion.py        # Fusion tool implementations
-    ├── audio.py         # Audio tool implementations
-    ├── render.py        # Render tool implementations
-    └── gallery.py       # Gallery tool implementations
-```
-
-### Running Tests
+## Development and release checks
 
 ```bash
-# Install test dependencies
-uv pip install -r requirements.lock
-
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test modules
-python -m pytest tests/test_registry.py -v
-python -m pytest tests/test_bridge.py -v
-python -m pytest tests/test_schemas.py -v
+python -m pip install build setuptools wheel ruff==0.15.7
+python -m build --no-isolation
+python -m pip install --no-deps dist/davinci_resolve_mcp-1.0.0-py3-none-any.whl
+python -m unittest discover -s tests -v
+ruff check src tests scripts/autostart.py
 ```
 
-Tests are pure Python and do not require DaVinci Resolve to be installed.
+Installed-package stdio tests must run after wheel installation. Tests launch a
+controlled loopback bridge and simulate Resolve; they never access personal
+projects. Lint currently checks syntax and correctness rules; repository-wide
+style modernization is outside this release correction.
 
-### Adding a New Tool
+CI also exercises Windows installation/update/rollback with real Python installs
+and a controlled Claude CLI, audits locked runtime dependencies, and scans Git
+history and the publication tree with redacted Gitleaks output.
 
-1. Add schema in appropriate `schemas/<category>.py`
-2. Register in `schemas/__init__.py` (added to `ALL_SCHEMAS` automatically)
-3. Add implementation in appropriate `tools/<category>.py`
-4. Register in `tools/__init__.py` via the category's `register_*_tools()` function
-5. Add to `manifests/tool-manifest.json` under `verified_tools` once tested
-6. Run tests to verify registration and schema consistency
-
-## Testing
-
-The test suite covers:
-
-- **Registry consistency** — all tools have schemas, no duplicates, verified tools subset
-- **Manifest consistency** — manifest verified tools match registry
-- **Schema validation** — all schemas well-formed, required fields present, enums valid
-- **Bridge protocol** — request/response handling, error classification, retries
-- **Read/write classification** — tools correctly categorized
-- **Transport layer** — HTTP communication, timeouts, connection errors
-
-## Security
-
-- The bridge binds to `127.0.0.1` only — never exposed on network interfaces.
-- Autostart is opt-in (`-EnableAutostart`) and creates a marker file.
-- Structured error responses prevent information leakage.
-- No authentication on the local bridge — ensure your machine is trusted.
-
-## Roadmap
-
-- [ ] WebSocket transport for lower latency
-- [ ] Batch tool execution support
-- [ ] Real-time timeline events via SSE
-- [ ] Additional AI/ML tool integrations
-- [ ] macOS/Linux install scripts
-- [ ] Official PyPI release
+See [release notes](RELEASE_NOTES.md) and [validation](RELEASE_VALIDATION.md).
+Do not tag, publish packages, or merge automatically while the release is blocked.
 
 ## License
 
-MIT License
-
-Copyright (c) 2026 Kerwil Gil
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+[MIT](LICENSE). Copyright (c) 2026 Kerwil Gil.
