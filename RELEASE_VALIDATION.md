@@ -6,9 +6,8 @@ Decision: **BLOCKED**. No release, tag, PyPI upload or automatic merge is author
 
 - Baseline: `main` at `8c5a7f96621e8ecd6fe3ce629e48a51940fa97b9`; clean checkout,
   last existing CI successful. No existing tags or releases found.
-- Local host: macOS arm64, Python 3.11.15. 100 tests passed before the final added
-  successful stdio integration test and unsupported-selector guard. The final
-  test count/status is recorded in the PR and CI logs.
+- Local host: macOS arm64, Python 3.11.15. **102 tests passed**, including successful installed stdio read/write and the
+  unsupported-selector guard. Cross-platform results are recorded in PR checks.
 - Built wheel and sdist; installed wheel in an isolated virtual environment.
   Real MCP SDK client initializes subprocesses from an unrelated temporary
   working directory via both module and console entry point. Discovers all 162

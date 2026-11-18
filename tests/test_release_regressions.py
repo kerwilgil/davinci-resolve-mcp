@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import sysconfig
 import tempfile
 import threading
 import unittest
@@ -286,7 +287,7 @@ class InstalledStdioTests(unittest.IsolatedAsyncioTestCase):
     async def test_installed_module_and_entrypoint_publish_real_schemas(self):
         # No source path is passed to the subprocess: this must use an installed wheel.
         for command, args in ((sys.executable, ["-m", "davinci_mcp.server"]),
-                              (str(Path(sys.executable).parent / ("davinci-resolve-mcp.exe" if os.name == "nt" else "davinci-resolve-mcp")), [])):
+                              (str(Path(sysconfig.get_path("scripts")) / ("davinci-resolve-mcp.exe" if os.name == "nt" else "davinci-resolve-mcp")), [])):
             with tempfile.TemporaryDirectory() as directory:
                 params = StdioServerParameters(command=command, args=args, cwd=directory, env={"DAVINCI_BRIDGE_MAX_RETRIES": "0", "DAVINCI_BRIDGE_TIMEOUT": "0.1"})
                 async with asyncio.timeout(20):
