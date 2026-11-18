@@ -34,7 +34,7 @@ GET_TIMELINE_INFO = create_tool_schema(
 
 GET_TIMELINE_CLIPS = create_tool_schema(
     name="get_timeline_clips",
-    description="Get all clips in the current timeline",
+    description="Get clips on one track (default video track 1)",
     category=ToolCategory.TIMELINE,
     mode=ToolMode.READ,
     properties={
@@ -154,7 +154,7 @@ EXPORT_TIMELINE = create_tool_schema(
     mode=ToolMode.WRITE,
     properties={
         "file_path": {"type": "string", "description": "Output file path"},
-        "format": {"type": "string", "description": "Export format", "enum": ["aaf", "xml", "fcp", "drx"]},
+        "format": {"type": "string", "description": "Export format", "enum": ["aaf", "xml", "fcp", "drt", "edl", "otio"]},
         "timeline_name": CommonParams.TIMELINE_NAME,
     },
     required=["file_path", "format"],
@@ -313,7 +313,7 @@ INSERT_TO_TIMELINE = create_tool_schema(
         "clip_name": CommonParams.CLIP_NAME,
         "track_type": CommonParams.TRACK_TYPE,
         "track_index": CommonParams.TRACK_INDEX,
-        "frame": {"type": "integer", "description": "Frame position to insert at", "minimum": 0},
+        "frame": {"type": "integer", "description": "Resolve record frame, including the timeline start frame", "minimum": 0},
         "timeline_name": CommonParams.TIMELINE_NAME,
     },
     required=["clip_name", "track_type", "track_index", "frame"],

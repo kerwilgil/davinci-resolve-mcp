@@ -35,6 +35,7 @@ class ServerConfig:
     name: str = "davinci-resolve"
     version: str = "1.0.0"
     description: str = "DaVinci Resolve MCP server for structured automation"
+    enable_experimental: bool = False
 
 
 DEFAULT_BRIDGE_CONFIG = BridgeConfig()
@@ -59,4 +60,5 @@ def get_server_config() -> ServerConfig:
         name=os.getenv("DAVINCI_MCP_NAME", "davinci-resolve"),
         version=os.getenv("DAVINCI_MCP_VERSION", "1.0.0"),
         description=os.getenv("DAVINCI_MCP_DESCRIPTION", "DaVinci Resolve MCP server for structured automation"),
+        enable_experimental=os.getenv("DAVINCI_MCP_ENABLE_EXPERIMENTAL", "").lower() in ("1", "true"),
     )

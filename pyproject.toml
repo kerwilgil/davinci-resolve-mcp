@@ -4,7 +4,8 @@ version = "1.0.0"
 description = "A local-first Model Context Protocol server for structured DaVinci Resolve automation."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Kerwil Gil", email = "kerwil.gil@up.ac.pa" }
 ]
@@ -48,5 +49,5 @@ select = ["E9", "F63", "F7", "F82"]
 
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"

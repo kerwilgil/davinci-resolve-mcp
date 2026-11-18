@@ -7,7 +7,7 @@ $PreviousAppData = $env:APPDATA
 $env:APPDATA = Join-Path $SandboxDir "appdata"
 $ConfigPath = Join-Path $HOME ".claude.json"
 if (Test-Path $ConfigPath) { throw "This test requires a disposable CI user without .claude.json" }
-$script:FailRegistration = $false
+$global:DavinciInstallerTestFailRegistration = $false
 function global:claude {
     $items = @($args)
     $config = if (Test-Path $ConfigPath) { Get-Content $ConfigPath -Raw | ConvertFrom-Json -AsHashtable } else { @{ mcpServers = @{} } }
@@ -21,7 +21,7 @@ function global:claude {
         default { throw "Unexpected Claude command" }
     }
     $config | ConvertTo-Json -Depth 20 | Set-Content $ConfigPath
-    $global:LASTEXITCODE = if ($script:FailRegistration -and $items[1] -eq 'add') { 42 } else { 0 }
+    $global:LASTEXITCODE = if ($global:DavinciInstallerTestFailRegistration -and $items[1] -eq 'add') { 42 } else { 0 }
 }
 try {
     @{ unrelated = 'preserve'; mcpServers = @{ other = @{ command = 'existing' } } } | ConvertTo-Json -Depth 10 | Set-Content $ConfigPath
@@ -45,14 +45,14 @@ try {
     $BeforeFailure = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ConfigPath))
     $BridgePath = Join-Path $env:APPDATA 'Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\CursorBridge.py'
     $BridgeHash = (Get-FileHash $BridgePath).Hash
-    $script:FailRegistration = $true
+    $global:DavinciInstallerTestFailRegistration = $true
     $Failed = $false
     try { & "$RepoRoot/scripts/install.ps1" -InstallDir $InstallDir -Force -EnableAutostart -Confirm:$false } catch { $Failed = $true }
     if (-not $Failed) { throw 'Injected registration failure was ignored' }
     if (-not (Test-Path $Sentinel)) { throw 'Previous environment was not restored' }
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($ConfigPath)) -ne $BeforeFailure) { throw 'Configuration rollback was not byte exact' }
     if ((Get-FileHash $BridgePath).Hash -ne $BridgeHash) { throw 'Bridge rollback failed' }
-    $script:FailRegistration = $false
+    $global:DavinciInstallerTestFailRegistration = $false
     $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json -AsHashtable
     $config.mcpServers['davinci-resolve']['env'] = @{ CUSTOM_SETTING = 'preserve' }
     $config | ConvertTo-Json -Depth 20 | Set-Content $ConfigPath

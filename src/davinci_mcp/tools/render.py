@@ -2,6 +2,8 @@
 Render tool implementations.
 """
 
+import asyncio
+
 from ..tools import ToolRegistry
 from ..bridge import ToolResult
 
@@ -60,7 +62,11 @@ async def start_rendering(arguments: dict, request_id: str | None = None) -> Too
     """Start rendering."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("start_rendering", wait_for_completion=arguments.get("wait_for_completion", False))
+    result = await asyncio.to_thread(
+        client.call_tool_simple, "start_rendering",
+        wait_for_completion=arguments.get("wait_for_completion", False),
+        completion_timeout=arguments.get("completion_timeout"),
+    )
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result
@@ -80,7 +86,9 @@ async def delete_render_job(arguments: dict, request_id: str | None = None) -> T
     """Delete render job."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("delete_render_job", job_index=arguments["job_index"])
+    result = client.call_tool_simple(
+        "delete_render_job", job_index=arguments.get("job_index"), job_id=arguments.get("job_id"),
+    )
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result
@@ -90,7 +98,9 @@ async def get_render_job_status(arguments: dict, request_id: str | None = None) 
     """Get render job status."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("get_render_job_status", job_index=arguments["job_index"])
+    result = client.call_tool_simple(
+        "get_render_job_status", job_index=arguments.get("job_index"), job_id=arguments.get("job_id"),
+    )
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result

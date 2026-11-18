@@ -4,7 +4,7 @@ CursorBridge - HTTP bridge between DaVinci Resolve and Cursor MCP.
 
 Launch from: Workspace > Scripts > CursorBridge
 Exposes a JSON API on localhost:9876 that an external MCP server can query.
-Works with DaVinci Resolve Free (no external scripting required).
+Resolve edition compatibility must be verified in the installed application.
 
 GET  endpoints = read-only queries
 POST endpoints = write / mutation operations
@@ -14,6 +14,8 @@ import json
 import sys
 import hmac
 import os
+import re
+from fractions import Fraction
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -98,23 +100,31 @@ def _timeline():
     return r, proj, tl, None
 
 
-def _named_clip_reference(tl, name):
+def _named_clip_target(tl, name):
     """Refuse ambiguous names so automation cannot edit an unintended clip."""
     matches = []
     for track_type in ("video", "audio", "subtitle"):
         for track_index in range(1, (tl.GetTrackCount(track_type) or 0) + 1):
             for clip_index, item in enumerate(tl.GetItemListInTrack(track_type, track_index) or []):
                 if item.GetName() == name:
-                    matches.append({"trackType": track_type, "trackIndex": track_index, "clipIndex": clip_index})
+                    reference = {"trackType": track_type, "trackIndex": track_index, "clipIndex": clip_index}
+                    matches.append((reference, item))
     if len(matches) != 1:
         raise ValueError("Clip name must identify exactly one timeline item")
     return matches[0]
+
+
+def _named_clip_reference(tl, name):
+    return _named_clip_target(tl, name)[0]
 
 
 def _validate_context(params):
     """Named scopes must match the current context; never silently edit another project."""
     project_name = params.get("projectName", params.get("project_name"))
     timeline_name = params.get("timelineName", params.get("timeline_name"))
+    if any(key in params and (not isinstance(params[key], str) or not params[key].strip())
+           for key in ("projectName", "project_name", "timelineName", "timeline_name")):
+        raise ValueError("Context selectors must be nonempty")
     if project_name or timeline_name:
         _, project, err = _project()
         if err or (project_name and project.GetName() != project_name):
@@ -131,8 +141,13 @@ def _clip_at(body):
     if err:
         return None, err
     name = body.get("clipName", body.get("clip_name"))
-    if name:
-        body = {**body, **_named_clip_reference(tl, name)}
+    if "clipName" in body or "clip_name" in body:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Clip name must be nonempty")
+        ref, item = _named_clip_target(tl, name)
+        if any(key in body and body[key] != value for key, value in ref.items()):
+            raise ValueError("Clip name does not match the requested reference")
+        return item, None
     tt = body.get("trackType", "video")
     ti = int(body.get("trackIndex", 1))
     ci = int(body.get("clipIndex", 0))
@@ -145,19 +160,21 @@ def _clip_at(body):
 
 
 def _find_pool_item(pool, name):
-    """Recursively search media pool for an item by name."""
+    """Find an exact, unique media pool clip name across folders."""
     def search(folder):
-        clips = folder.GetClipList() or []
-        for c in clips:
-            if safe(lambda: c.GetName()) == name:
-                return c
-        for sf in (folder.GetSubFolderList() or []):
-            hit = search(sf)
-            if hit:
-                return hit
-        return None
+        for clip in folder.GetClipList() or []:
+            if clip.GetName() == name:
+                yield clip
+        for child in folder.GetSubFolderList() or []:
+            yield from search(child)
     root = pool.GetRootFolder()
-    return search(root) if root else None
+    if not root:
+        return None
+    matches = search(root)
+    item = next(matches, None)
+    if next(matches, None) is not None:
+        raise ValueError("Media pool clip name is ambiguous")
+    return item
 
 
 def _find_folder_by_path(pool, path):
@@ -167,50 +184,111 @@ def _find_folder_by_path(pool, path):
         return None
     if not path or path.lower() in ("root", "/", ""):
         return root
-    parts = [p for p in path.split("/") if p and p.lower() not in ("root", "master")]
+    parts = [part for part in path.split("/") if part]
+    if parts[0].lower() in ("root", "master"):
+        parts = parts[1:]
     current = root
     for part in parts:
-        subfolders = current.GetSubFolderList() or []
-        found = None
-        for sf in subfolders:
-            if safe(lambda sf=sf: sf.GetName()) == part:
-                found = sf
-                break
-        if not found:
+        matches = [folder for folder in current.GetSubFolderList() or [] if folder.GetName() == part]
+        if len(matches) > 1:
+            raise ValueError("Media folder path is ambiguous")
+        if not matches:
             return None
-        current = found
+        current = matches[0]
     return current
 
 
-def _resolve_clip_refs(tl, clip_refs):
-    """Resolve a list of {trackType, trackIndex, clipIndex} dicts to TimelineItem objects."""
+def _resolve_clip_refs(tl, clip_refs, filters=None):
+    """Resolve all references with no duplicates before a timeline mutation."""
     items = []
+    seen = set()
     for ref in clip_refs:
-        tt = ref.get("trackType", "video")
-        ti = int(ref.get("trackIndex", 1))
-        ci = int(ref.get("clipIndex", 0))
-        track_items = safe(lambda tt=tt, ti=ti: tl.GetItemListInTrack(tt, ti))
-        if track_items and 0 <= ci < len(track_items):
-            items.append(track_items[ci])
+        named_item = None
+        if isinstance(ref, str):
+            ref, named_item = _named_clip_target(tl, ref)
+        tt, ti, ci = ref.get("trackType"), ref.get("trackIndex"), ref.get("clipIndex")
+        if (tt not in ("video", "audio", "subtitle") or type(ti) is not int or ti < 1
+                or type(ci) is not int or ci < 0 or (tt, ti, ci) in seen):
+            raise ValueError("Invalid or duplicate clip reference")
+        if filters and any(ref[key] != value for key, value in filters.items()):
+            raise ValueError("Clip lies outside the requested track")
+        if named_item is None:
+            track_items = tl.GetItemListInTrack(tt, ti) or []
+            if ci >= len(track_items):
+                raise ValueError("Clip reference does not exist")
+            named_item = track_items[ci]
+        seen.add((tt, ti, ci))
+        items.append(named_item)
     return items
 
 
+def _clip_selection(body):
+    if "clips" in body and "clipNames" in body:
+        raise ValueError("Choose one clip selector")
+    if "clipNames" in body:
+        names = body["clipNames"]
+        if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
+            raise ValueError("Expected a list of clip names")
+        return names
+    return body.get("clips", [])
+
+
 def _get_album(gallery, body):
-    """Get a gallery album from body params (albumIndex + albumType), or current album."""
-    album_index = int(body.get("albumIndex", 0))
-    album_type = body.get("albumType", "still")
-    if album_index > 0:
-        if album_type == "powergrade":
-            albums = safe(lambda: gallery.GetGalleryPowerGradeAlbums()) or []
-        else:
-            albums = safe(lambda: gallery.GetGalleryStillAlbums()) or []
-        if album_index < 1 or album_index > len(albums):
-            return None, {"error": "Album index %d out of range (1-%d)" % (album_index, len(albums))}
-        return albums[album_index - 1], None
-    album = safe(lambda: gallery.GetCurrentStillAlbum())
-    if not album:
-        return None, {"error": "No album selected"}
-    return album, None
+    """Resolve exactly one album or the current album when no selector was given."""
+    kind = body.get("albumType")
+    if kind not in (None, "still", "powergrade"):
+        raise ValueError("Invalid album type")
+    if "albumName" in body:
+        if "albumIndex" in body or not body["albumName"]:
+            raise ValueError("Invalid album selector")
+        albums = []
+        if kind in (None, "still"):
+            albums.extend(gallery.GetGalleryStillAlbums() or [])
+        if kind in (None, "powergrade"):
+            albums.extend(gallery.GetGalleryPowerGradeAlbums() or [])
+        matches = [album for album in albums if gallery.GetAlbumName(album) == body["albumName"]]
+        if len(matches) != 1:
+            raise ValueError("Album name must identify exactly one album")
+        return matches[0], None
+    index = body.get("albumIndex", 0)
+    if isinstance(index, str) and re.fullmatch(r"[0-9]+", index):
+        index = int(index)
+    if type(index) is not int or index < 0:
+        raise ValueError("Invalid album index")
+    if index:
+        albums = (gallery.GetGalleryPowerGradeAlbums() if kind == "powergrade"
+                  else gallery.GetGalleryStillAlbums()) or []
+        if index > len(albums):
+            raise ValueError("Album index is out of range")
+        return albums[index - 1], None
+    if kind is not None:
+        raise ValueError("Album type requires a name or index")
+    album = gallery.GetCurrentStillAlbum()
+    return (album, None) if album else (None, {"error": "No album selected"})
+
+
+def _select_stills(album, *, indices=None, labels=None, all_if_unspecified=False):
+    stills = album.GetStills() or []
+    if indices is not None and labels is not None:
+        raise ValueError("Choose one still selector")
+    if indices is None and labels is None:
+        return stills if all_if_unspecified else []
+    if indices is not None:
+        if not indices or any(type(index) is not int or not 1 <= index <= len(stills) for index in indices):
+            raise ValueError("Invalid still index")
+        selected = indices
+    else:
+        if not labels or any(not isinstance(label, str) or not label for label in labels):
+            raise ValueError("Invalid still label")
+        by_label = {}
+        for index, still in enumerate(stills, 1):
+            by_label.setdefault(album.GetLabel(still), []).append(index)
+        if any(len(by_label.get(label, [])) != 1 for label in labels):
+            raise ValueError("Still labels must each identify exactly one still")
+        selected = [by_label[label][0] for label in labels]
+    if len(set(selected)) != len(selected):
+        raise ValueError("Duplicate still selector")
+    return [stills[index - 1] for index in selected]
 
 
 # ---------------------------------------------------------------------------
@@ -572,20 +650,9 @@ def gather_album_stills(qs):
     gallery = safe(lambda: proj.GetGallery())
     if not gallery:
         return {"error": "Cannot access gallery"}
-    album_index = int(qs.get("album_index", ["0"])[0])
-    album_type = qs.get("album_type", ["still"])[0]
-    if album_index > 0:
-        if album_type == "powergrade":
-            albums = safe(lambda: gallery.GetGalleryPowerGradeAlbums()) or []
-        else:
-            albums = safe(lambda: gallery.GetGalleryStillAlbums()) or []
-        if album_index < 1 or album_index > len(albums):
-            return {"error": "Album index %d out of range (1-%d)" % (album_index, len(albums))}
-        album = albums[album_index - 1]
-    else:
-        album = safe(lambda: gallery.GetCurrentStillAlbum())
-    if not album:
-        return {"error": "No album selected"}
+    album, aerr = _get_album(gallery, _query_body(qs))
+    if aerr:
+        return aerr
     album_name = safe(lambda: gallery.GetAlbumName(album))
     stills = safe(lambda: album.GetStills()) or []
     result = []
@@ -612,13 +679,57 @@ def action_open_page(body):
     return {"success": bool(r.OpenPage(page)), "page": page}
 
 
+def _timeline_timecode(timeline, frame):
+    """Convert an offset from the first timeline frame to SMPTE timecode."""
+    if type(frame) is not int or not 0 <= frame <= timeline.GetEndFrame() - timeline.GetStartFrame():
+        raise ValueError("Frame is outside the current timeline")
+    rate_text = str(timeline.GetSetting("timelineFrameRate")).strip()
+    rates = {"23.976": "24000/1001", "23.98": "24000/1001", "29.97": "30000/1001",
+             "47.952": "48000/1001", "59.94": "60000/1001", "119.88": "120000/1001"}
+    rate = Fraction(rates.get(rate_text, rate_text))
+    fps = round(rate)
+    if not 1 <= fps <= 120 or rate not in (Fraction(fps), Fraction(fps * 1000, 1001)):
+        raise ValueError("Unsupported timeline frame rate")
+    match = re.fullmatch(r"([0-9]{2}):([0-9]{2}):([0-9]{2})([:;])([0-9]{2,3})",
+                         timeline.GetStartTimecode() or "")
+    if not match:
+        raise ValueError("Invalid timeline start timecode")
+    hours, minutes, seconds, separator, frames = match.groups()
+    hours, minutes, seconds, frames = map(int, (hours, minutes, seconds, frames))
+    drop_setting = str(timeline.GetSetting("timelineDropFrameTimecode")).lower()
+    drop = separator == ";" or drop_setting in ("1", "true")
+    skipped = {30: 2, 60: 4}.get(fps) if drop else 0
+    if skipped is None or (drop and rate != Fraction(fps * 1000, 1001)):
+        raise ValueError("Unsupported drop-frame rate")
+    if hours >= 24 or minutes >= 60 or seconds >= 60 or frames >= fps:
+        raise ValueError("Invalid timeline start timecode")
+    if skipped and minutes % 10 and seconds == 0 and frames < skipped:
+        raise ValueError("Timeline starts on a skipped drop-frame label")
+    total_minutes = hours * 60 + minutes
+    counter = (total_minutes * 60 + seconds) * fps + frames
+    counter += frame - skipped * (total_minutes - total_minutes // 10)
+    if skipped:
+        minute = fps * 60 - skipped
+        ten_minutes = fps * 600 - skipped * 9
+        blocks, remainder = divmod(counter, ten_minutes)
+        counter += skipped * (blocks * 9 + max(0, (remainder - skipped) // minute))
+    if counter >= fps * 86400:
+        raise ValueError("Frame crosses the 24-hour timecode boundary")
+    seconds, frames = divmod(counter, fps)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}{';' if drop else ':'}{frames:02}"
+
+
 def action_set_timecode(body):
     _, _, tl, err = _timeline()
     if err:
         return err
-    tc = body.get("timecode", "")
+    if "frame" in body and "timecode" in body:
+        raise ValueError("Provide one playhead selector")
+    tc = _timeline_timecode(tl, body["frame"]) if "frame" in body else body.get("timecode")
     if not tc:
-        return {"error": "timecode is required (e.g. '01:00:05:00')"}
+        return {"error": "A frame or timecode is required"}
     return {"success": bool(tl.SetCurrentTimecode(tc)), "timecode": tc}
 
 
@@ -711,7 +822,9 @@ def action_create_timeline(body):
                 settings_ok = bool(tl.AddTrack(track_type)) and settings_ok
             for index in range(current, desired, -1):
                 settings_ok = bool(tl.DeleteTrack(track_type, index)) and settings_ok
-    return {"success": settings_ok, "timeline": name}
+    if not settings_ok:
+        raise RuntimeError("Timeline created but some requested settings could not be applied")
+    return {"success": True, "timeline": name}
 
 
 def action_rename_timeline(body):
@@ -743,7 +856,15 @@ def action_add_track(body):
         return err
     tt = body.get("trackType", "video")
     sub = body.get("subTrackType", "")
-    if sub:
+    if "trackIndex" in body:
+        index = body["trackIndex"]
+        if type(index) is not int or not 1 <= index <= (tl.GetTrackCount(tt) or 0):
+            raise ValueError("Track insertion index is out of range")
+        options = {"index": index}
+        if sub:
+            options["audioType"] = sub
+        ok = tl.AddTrack(tt, options)
+    elif sub:
         ok = tl.AddTrack(tt, sub)
     else:
         ok = tl.AddTrack(tt)
@@ -800,12 +921,27 @@ def action_import_media(body):
     if err:
         return err
     paths = body.get("filePaths", [])
-    if not paths:
+    if not isinstance(paths, list) or not paths or any(
+            not isinstance(path, str) or not os.path.isabs(path) or not os.path.isfile(path)
+            for path in paths) or len(set(paths)) != len(paths):
         return {"error": "filePaths array is required"}
     pool = proj.GetMediaPool()
     if not pool:
         return {"error": "No media pool"}
-    items = pool.ImportMedia(paths)
+    if "folderPath" in body:
+        if not isinstance(body["folderPath"], str) or not body["folderPath"].strip():
+            raise ValueError("Destination folder path is empty")
+        destination = _find_folder_by_path(pool, body["folderPath"])
+        previous = pool.GetCurrentFolder()
+        if not destination or not previous or not pool.SetCurrentFolder(destination):
+            raise ValueError("Cannot select the requested media folder")
+        try:
+            items = pool.ImportMedia(paths)
+        finally:
+            if not pool.SetCurrentFolder(previous):
+                raise RuntimeError("Could not restore the original media folder")
+    else:
+        items = pool.ImportMedia(paths)
     if not items:
         return {"error": "Import failed ÔÇö check file paths are valid Windows paths accessible from Resolve"}
     return {
@@ -912,6 +1048,8 @@ def action_add_clip_marker(body):
 # -- Titles / Generators ---------------------------------------------------
 
 def action_insert_title(body):
+    if {"trackType", "trackIndex", "frame", "compositionName"} & body.keys():
+        raise ValueError("Resolve has no documented API for explicit template placement")
     _, _, tl, err = _timeline()
     if err:
         return err
@@ -929,6 +1067,8 @@ def action_insert_title(body):
 
 
 def action_insert_generator(body):
+    if {"trackType", "trackIndex", "frame", "compositionName"} & body.keys():
+        raise ValueError("Resolve has no documented API for explicit template placement")
     _, _, tl, err = _timeline()
     if err:
         return err
@@ -946,6 +1086,8 @@ def action_insert_generator(body):
 
 
 def action_insert_fusion_comp(body):
+    if {"trackType", "trackIndex", "frame", "compositionName"} & body.keys():
+        raise ValueError("Resolve has no documented API for explicit template placement")
     _, _, tl, err = _timeline()
     if err:
         return err
@@ -982,17 +1124,28 @@ def action_add_render_job(body):
     _, proj, err = _project()
     if err:
         return err
-    if body.get("renderRange"):
-        return {"error": "Explicit render ranges are not implemented"}
+    render_range = body.get("renderRange", "full")
+    if render_range != "full":
+        raise ValueError("Only full timeline render jobs are implemented")
+    settings = {"SelectAllFrames": True}
+    if "outputPath" in body:
+        output_path = body["outputPath"]
+        _new_export_path(output_path)
+        target_dir, filename = os.path.split(output_path)
+        custom_name, suffix = os.path.splitext(filename)
+        if not custom_name:
+            raise ValueError("Render output needs a file name")
+        settings.update({"TargetDir": target_dir, "CustomName": custom_name})
+    else:
+        suffix = ""
     if body.get("preset") and not proj.LoadRenderPreset(body["preset"]):
         return {"error": "Render preset could not be loaded"}
-    if body.get("outputPath"):
-        output_path = body["outputPath"]
-        target_dir, filename = os.path.split(output_path)
-        if not target_dir or not filename:
-            return {"error": "Render output must include directory and filename"}
-        if not proj.SetRenderSettings({"TargetDir": target_dir, "CustomName": os.path.splitext(filename)[0]}):
-            return {"error": "Render destination could not be set"}
+    if suffix:
+        format_info = proj.GetCurrentRenderFormatAndCodec() or {}
+        if suffix.lower().lstrip(".") != str(format_info.get("format", "")).lower():
+            raise RuntimeError("Preset loaded but output extension differs from its format")
+    if not proj.SetRenderSettings(settings):
+        raise RuntimeError("Could not apply render settings")
     job_id = proj.AddRenderJob()
     if not job_id:
         return {"error": "Failed to add render job ÔÇö check render settings are complete"}
@@ -1003,12 +1156,15 @@ def action_start_rendering(body):
     _, proj, err = _project()
     if err:
         return err
-    job_ids = body.get("jobIds", [])
-    if job_ids:
-        ok = proj.StartRendering(job_ids)
-    else:
-        ok = proj.StartRendering()
-    return {"success": bool(ok)}
+    if proj.IsRenderingInProgress():
+        return {"error": "Resolve is already rendering"}
+    queue_ids = _render_job_ids(proj)
+    job_ids = body.get("jobIds", queue_ids)
+    if (not isinstance(job_ids, list) or not job_ids
+            or any(not isinstance(job_id, str) or job_id not in queue_ids for job_id in job_ids)
+            or len(set(job_ids)) != len(job_ids)):
+        raise ValueError("Invalid render job selection")
+    return {"success": bool(proj.StartRendering(job_ids)), "jobIds": job_ids}
 
 
 def action_stop_rendering(body):
@@ -1023,12 +1179,12 @@ def action_delete_render_job(body):
     _, proj, err = _project()
     if err:
         return err
-    job_id = body.get("jobId", "")
-    if job_id:
-        return {"success": bool(proj.DeleteRenderJob(job_id))}
-    if body.get("all", False):
+    if body.get("all") is True:
+        if "jobId" in body or "jobIndex" in body:
+            raise ValueError("Cannot combine all with a job selector")
         return {"success": bool(proj.DeleteAllRenderJobs())}
-    return {"error": "Provide jobId or set all=true"}
+    job_id = _render_job_id(proj, body)
+    return {"success": bool(proj.DeleteRenderJob(job_id)), "jobId": job_id}
 
 
 def action_get_render_formats(body):
@@ -1074,6 +1230,13 @@ def action_set_timeline_setting(body):
     return {"success": bool(tl.SetSetting(key, str(value))), "key": key, "value": value}
 
 
+def _new_export_path(path):
+    if not isinstance(path, str) or not os.path.isabs(path) or not os.path.basename(path):
+        raise ValueError("Export requires an absolute file path")
+    if not os.path.isdir(os.path.dirname(path)) or os.path.lexists(path):
+        raise ValueError("Export path must be new and its directory must exist")
+
+
 def action_export_frame(body):
     _, proj, err = _project()
     if err:
@@ -1081,6 +1244,12 @@ def action_export_frame(body):
     path = body.get("filePath", "")
     if not path:
         return {"error": "filePath is required (e.g. 'C:\\\\output\\\\frame.png')"}
+    suffix = os.path.splitext(path)[1].lower().lstrip(".")
+    fmt = body.get("format", suffix)
+    aliases = {"tiff": "tif", "jpeg": "jpg"}
+    if aliases.get(fmt, fmt) != aliases.get(suffix, suffix):
+        raise ValueError("Image format and file extension must agree")
+    _new_export_path(path)
     return {"success": bool(proj.ExportCurrentFrameAsStill(path)), "filePath": path}
 
 
@@ -1195,17 +1364,15 @@ def action_delete_media_pool_clips(body):
     clip_names = body.get("clipNames", [])
     if not clip_names:
         return {"error": "clipNames array is required"}
-    items, not_found = [], []
-    for name in clip_names:
-        item = _find_pool_item(pool, name)
-        if item:
-            items.append(item)
-        else:
-            not_found.append(name)
-    if not items:
-        return {"error": "No matching clips found", "notFound": not_found}
+    if not isinstance(clip_names, list) or not all(isinstance(name, str) and name for name in clip_names):
+        raise ValueError("Expected a list of clip names")
+    if len(set(clip_names)) != len(clip_names):
+        raise ValueError("Duplicate clip name")
+    items = [_find_pool_item(pool, name) for name in clip_names]
+    if any(item is None for item in items):
+        return {"error": "At least one requested clip does not exist"}
     ok = pool.DeleteClips(items)
-    return {"success": bool(ok), "deleted": len(items), "notFound": not_found}
+    return {"success": bool(ok), "deleted": len(items)}
 
 
 def action_move_media_pool_clips(body):
@@ -1314,14 +1481,17 @@ def action_export_metadata(body):
     if not file_name:
         return {"error": "fileName is required (CSV path)"}
     clip_names = body.get("clipNames", [])
-    items = [i for name in clip_names for i in [_find_pool_item(pool, name)] if i] if clip_names else []
+    items = [_find_pool_item(pool, name) for name in clip_names]
+    if any(item is None for item in items):
+        raise ValueError("Some requested metadata clips do not exist")
+    _new_export_path(file_name)
     ok = pool.ExportMetadata(file_name, items) if items else pool.ExportMetadata(file_name)
     return {"success": bool(ok), "fileName": file_name}
 
 
 def action_insert_to_timeline(body):
     """Insert a media pool clip at a specific track and record frame position."""
-    _, proj, err = _project()
+    _, proj, timeline, err = _timeline()
     if err:
         return err
     pool = proj.GetMediaPool()
@@ -1333,6 +1503,21 @@ def action_insert_to_timeline(body):
     item = _find_pool_item(pool, clip_name)
     if not item:
         return {"error": "Clip '%s' not found in media pool" % clip_name}
+    media_type = body.get("mediaType")
+    if media_type is not None and (type(media_type) is not int or media_type not in (1, 2)):
+        raise ValueError("Invalid insertion media type")
+    track_index = body.get("trackIndex")
+    if track_index is not None:
+        if media_type not in (1, 2):
+            raise ValueError("A target track requires a video or audio media type")
+        track_type = "video" if media_type == 1 else "audio"
+        if (type(track_index) is not int or not 1 <= track_index <= timeline.GetTrackCount(track_type)
+                or timeline.GetIsTrackLocked(track_type, track_index)):
+            raise ValueError("Target track is missing or locked")
+    if "recordFrame" in body:
+        frame = body["recordFrame"]
+        if type(frame) is not int or frame < timeline.GetStartFrame():
+            raise ValueError("Record frame precedes the timeline start")
     clip_info = {"mediaPoolItem": item}
     for key, body_key in [("trackIndex", "trackIndex"), ("recordFrame", "recordFrame"),
                           ("startFrame", "startFrame"), ("endFrame", "endFrame"),
@@ -1340,6 +1525,15 @@ def action_insert_to_timeline(body):
         val = body.get(body_key)
         if val is not None:
             clip_info[key] = int(val)
+    if "startFrame" not in clip_info:
+        clip_info["startFrame"] = 0
+    if "endFrame" not in clip_info:
+        frames = item.GetClipProperty("Frames")
+        if not isinstance(frames, (str, int)) or not str(frames).isdigit() or int(frames) < 1:
+            raise ValueError("Could not determine source clip length")
+        clip_info["endFrame"] = int(frames) - 1
+    if not 0 <= clip_info["startFrame"] <= clip_info["endFrame"]:
+        raise ValueError("Invalid source frame range")
     tl_items = pool.AppendToTimeline([clip_info])
     if not tl_items:
         return {"error": "Failed to insert clip to timeline"}
@@ -1388,11 +1582,12 @@ def action_delete_timeline_clips(body):
     _, _, tl, err = _timeline()
     if err:
         return err
-    clip_refs = body.get("clips", [])
+    clip_refs = _clip_selection(body)
     ripple = body.get("ripple", False)
     if not clip_refs:
         return {"error": "clips array is required (each: {trackType, trackIndex, clipIndex})"}
-    items = _resolve_clip_refs(tl, clip_refs)
+    filters = {key: body[key] for key in ("trackType", "trackIndex") if key in body}
+    items = _resolve_clip_refs(tl, clip_refs, filters)
     if not items:
         return {"error": "No matching clips found"}
     ok = tl.DeleteClips(items, ripple)
@@ -1403,7 +1598,7 @@ def action_link_timeline_clips(body):
     _, _, tl, err = _timeline()
     if err:
         return err
-    clip_refs = body.get("clips", [])
+    clip_refs = _clip_selection(body)
     linked = body.get("linked", True)
     if len(clip_refs) < 2:
         return {"error": "At least 2 clip references required"}
@@ -1418,7 +1613,7 @@ def action_create_compound_clip(body):
     _, _, tl, err = _timeline()
     if err:
         return err
-    clip_refs = body.get("clips", [])
+    clip_refs = _clip_selection(body)
     if not clip_refs:
         return {"error": "clips array is required"}
     items = _resolve_clip_refs(tl, clip_refs)
@@ -1439,15 +1634,20 @@ def action_create_fusion_clip(body):
     _, _, tl, err = _timeline()
     if err:
         return err
-    clip_refs = body.get("clips", [])
+    clip_refs = _clip_selection(body)
     if not clip_refs:
         return {"error": "clips array is required"}
     items = _resolve_clip_refs(tl, clip_refs)
     if not items:
         return {"error": "No matching clips found"}
+    name = body.get("name")
+    if "name" in body and (not isinstance(name, str) or not name.strip()):
+        raise ValueError("Fusion clip name must be nonempty")
     result = tl.CreateFusionClip(items)
     if not result:
         return {"error": "Failed to create Fusion clip"}
+    if name and not result.SetName(name):
+        raise RuntimeError("Fusion clip created but name could not be set")
     return {"success": True, "name": safe(lambda: result.GetName())}
 
 
@@ -1485,11 +1685,20 @@ def action_export_timeline(body):
     et_attr = type_map.get(export_type)
     if not et_attr:
         return {"error": "Unknown exportType '%s'. Valid: %s" % (export_type, ", ".join(type_map.keys()))}
-    es_attr = subtype_map.get(export_subtype, "EXPORT_NONE")
+    if export_type == "AAF" and "exportSubtype" not in body:
+        export_subtype = "EXPORT_AAF_NEW"
+    es_attr = subtype_map.get(export_subtype)
+    allowed = {
+        "AAF": {"EXPORT_AAF_NEW", "EXPORT_AAF_EXISTING"},
+        "EDL": {"EXPORT_NONE", "EXPORT_CDL", "EXPORT_SDL", "EXPORT_MISSING_CLIPS"},
+    }
+    if es_attr not in allowed.get(export_type, {"EXPORT_NONE"}):
+        raise ValueError("Export subtype does not apply to this format")
     et = safe(lambda: getattr(r, et_attr))
     es = safe(lambda: getattr(r, es_attr))
-    if et is None:
+    if et is None or es is None:
         return {"error": "Resolve does not support export constant '%s'" % et_attr}
+    _new_export_path(file_name)
     ok = tl.Export(file_name, et, es)
     return {"success": bool(ok), "fileName": file_name, "exportType": export_type}
 
@@ -1519,38 +1728,69 @@ def action_create_gallery_album(body):
     if not gallery:
         return {"error": "Cannot access gallery"}
     album_type = body.get("albumType", "still")
+    if album_type not in ("still", "powergrade"):
+        raise ValueError("Invalid album type")
+    name = body.get("name", "")
+    if name:
+        albums = (gallery.GetGalleryPowerGradeAlbums() or []) + (gallery.GetGalleryStillAlbums() or [])
+        if any(gallery.GetAlbumName(existing) == name for existing in albums):
+            raise ValueError("An album already has this name")
     if album_type == "powergrade":
         album = gallery.CreateGalleryPowerGradeAlbum()
     else:
         album = gallery.CreateGalleryStillAlbum()
     if not album:
         return {"error": "Failed to create %s album" % album_type}
-    name = body.get("name", "")
-    if name:
-        gallery.SetAlbumName(album, name)
+    if name and not gallery.SetAlbumName(album, name):
+        raise RuntimeError("Album created but name could not be set")
     final_name = safe(lambda: gallery.GetAlbumName(album))
     return {"success": True, "albumName": final_name, "albumType": album_type}
 
 
-def action_grab_still(body):
-    _, _, tl, err = _timeline()
+def _grab_in_album(body, grab):
+    _, project, timeline, err = _timeline()
     if err:
         return err
-    still = tl.GrabStill()
-    if not still:
-        return {"error": "Failed to grab still. Make sure you are on the Color page."}
-    return {"success": True}
+    gallery = project.GetGallery()
+    if not gallery:
+        return {"error": "Cannot access gallery"}
+    album, err = _get_album(gallery, body)
+    if err:
+        return err
+    previous = gallery.GetCurrentStillAlbum()
+    if not previous:
+        return {"error": "Cannot restore the current album"}
+    if not gallery.SetCurrentStillAlbum(album):
+        return {"error": "Cannot select requested album"}
+    try:
+        return grab(timeline, album)
+    finally:
+        if not gallery.SetCurrentStillAlbum(previous):
+            raise RuntimeError("Could not restore the previously selected album")
+
+
+def action_grab_still(body):
+    def grab(timeline, album):
+        still = timeline.GrabStill()
+        if not still:
+            return {"error": "Resolve did not grab a still"}
+        if "label" in body and not album.SetLabel(still, body["label"]):
+            raise RuntimeError("Still created but label could not be set")
+        return {"success": True}
+    return _grab_in_album(body, grab)
 
 
 def action_grab_all_stills(body):
-    _, _, tl, err = _timeline()
-    if err:
-        return err
-    source = int(body.get("stillFrameSource", 2))
-    stills = tl.GrabAllStills(source)
-    if not stills:
-        return {"error": "Failed to grab stills"}
-    return {"success": True, "count": len(stills)}
+    source = body.get("stillFrameSource", 2)
+    if type(source) is not int or source not in (1, 2):
+        raise ValueError("Invalid still frame source")
+
+    def grab(timeline, album):
+        stills = timeline.GrabAllStills(source)
+        if not stills:
+            return {"error": "Resolve did not grab any stills"}
+        return {"success": True, "count": len(stills)}
+    return _grab_in_album(body, grab)
 
 
 def action_export_stills(body):
@@ -1566,14 +1806,12 @@ def action_export_stills(body):
     folder_path = body.get("folderPath", "")
     file_prefix = body.get("filePrefix", "still")
     fmt = body.get("format", "png")
-    if not folder_path:
-        return {"error": "folderPath is required"}
-    stills = safe(lambda: album.GetStills()) or []
-    still_indices = body.get("stillIndices", [])
-    if still_indices:
-        selected = [stills[i - 1] for i in still_indices if 1 <= i <= len(stills)]
-    else:
-        selected = stills
+    if not os.path.isabs(folder_path) or not os.path.isdir(folder_path) or os.listdir(folder_path):
+        raise ValueError("Still export requires an empty, existing absolute directory")
+    fmt = "tif" if fmt == "tiff" else fmt
+    if fmt not in {"dpx", "cin", "tif", "jpg", "png", "ppm", "bmp", "xpm", "drx"}:
+        raise ValueError("Unsupported gallery export format")
+    selected = _select_stills(album, indices=body.get("stillIndices"), all_if_unspecified=True)
     if not selected:
         return {"error": "No stills to export"}
     ok = album.ExportStills(selected, folder_path, file_prefix, fmt)
@@ -1587,9 +1825,9 @@ def action_import_stills(body):
     gallery = safe(lambda: proj.GetGallery())
     if not gallery:
         return {"error": "Cannot access gallery"}
-    album = safe(lambda: gallery.GetCurrentStillAlbum())
-    if not album:
-        return {"error": "No album selected"}
+    album, err = _get_album(gallery, body)
+    if err:
+        return err
     file_paths = body.get("filePaths", [])
     if not file_paths:
         return {"error": "filePaths array is required"}
@@ -1607,11 +1845,7 @@ def action_delete_stills(body):
     album, aerr = _get_album(gallery, body)
     if aerr:
         return aerr
-    stills = safe(lambda: album.GetStills()) or []
-    still_indices = body.get("stillIndices", [])
-    if not still_indices:
-        return {"error": "stillIndices array is required"}
-    selected = [stills[i - 1] for i in still_indices if 1 <= i <= len(stills)]
+    selected = _select_stills(album, indices=body.get("stillIndices"), labels=body.get("stillLabels"))
     if not selected:
         return {"error": "No stills found at given indices"}
     ok = album.DeleteStills(selected)
@@ -1625,16 +1859,19 @@ def action_set_still_label(body):
     gallery = safe(lambda: proj.GetGallery())
     if not gallery:
         return {"error": "Cannot access gallery"}
-    album = safe(lambda: gallery.GetCurrentStillAlbum())
-    if not album:
-        return {"error": "No album selected"}
-    still_index = int(body.get("stillIndex", 0))
-    label = body.get("label", "")
-    stills = safe(lambda: album.GetStills()) or []
-    if still_index < 1 or still_index > len(stills):
-        return {"error": "stillIndex %d out of range (1-%d)" % (still_index, len(stills))}
-    ok = album.SetLabel(stills[still_index - 1], label)
-    return {"success": bool(ok), "label": label}
+    album, err = _get_album(gallery, body)
+    if err:
+        return err
+    selected = _select_stills(
+        album, indices=[body["stillIndex"]] if "stillIndex" in body else None,
+        labels=[body["stillLabel"]] if "stillLabel" in body else None,
+    )
+    if len(selected) != 1:
+        raise ValueError("A still selector is required")
+    if ("newLabel" in body) == ("label" in body):
+        raise ValueError("A single replacement label is required")
+    label = body.get("newLabel", body.get("label"))
+    return {"success": bool(album.SetLabel(selected[0], label)), "label": label}
 
 
 # -- Color Grading / Node Graph / LUT / CDL --------------------------------
@@ -1992,10 +2229,21 @@ def action_add_fusion_comp(body):
     item, err = _clip_at(body)
     if err:
         return err
+    name = body.get("compName")
+    before = set(item.GetFusionCompNameList() or []) if name else set()
+    if "compName" in body and (not name or name in before):
+        raise ValueError("A unique composition name is required")
     comp = item.AddFusionComp()
     if not comp:
         return {"error": "Failed to add Fusion composition"}
-    return {"success": True}
+    if name:
+        added = set(item.GetFusionCompNameList() or []) - before
+        if len(added) != 1:
+            raise RuntimeError("New composition could not be identified")
+        generated = next(iter(added))
+        if name != generated and not item.RenameFusionCompByName(generated, name):
+            raise RuntimeError("Composition added but could not be renamed")
+    return {"success": True, "compName": name}
 
 
 def action_import_fusion_comp(body):
@@ -2016,9 +2264,20 @@ def action_export_fusion_comp(body):
     if err:
         return err
     path = body.get("path", "")
-    comp_index = int(body.get("compIndex", 1))
+    names = item.GetFusionCompNameList() or []
+    if "compName" in body:
+        if "compIndex" in body or names.count(body["compName"]) != 1:
+            raise ValueError("Composition name must identify exactly one item")
+        comp_index = names.index(body["compName"]) + 1
+    else:
+        comp_index = body.get("compIndex", 1)
+        if type(comp_index) is not int or not 1 <= comp_index <= len(names):
+            raise ValueError("Composition index is out of range")
     if not path:
         return {"error": "path is required"}
+    if os.path.splitext(path)[1].lower() != ".comp":
+        raise ValueError("Fusion export requires a .comp file")
+    _new_export_path(path)
     ok = item.ExportFusionComp(path, comp_index)
     return {"success": bool(ok), "path": path, "compIndex": comp_index}
 
@@ -2028,6 +2287,8 @@ def action_delete_fusion_comp(body):
     if err:
         return err
     comp_name = body.get("compName", "")
+    if (item.GetFusionCompNameList() or []).count(comp_name) != 1:
+        raise ValueError("Composition name must identify one item")
     if not comp_name:
         return {"error": "compName is required"}
     ok = item.DeleteFusionCompByName(comp_name)
@@ -2039,6 +2300,8 @@ def action_load_fusion_comp(body):
     if err:
         return err
     comp_name = body.get("compName", "")
+    if (item.GetFusionCompNameList() or []).count(comp_name) != 1:
+        raise ValueError("Composition name must identify one item")
     if not comp_name:
         return {"error": "compName is required"}
     comp = item.LoadFusionCompByName(comp_name)
@@ -2053,8 +2316,12 @@ def action_rename_fusion_comp(body):
         return err
     old_name = body.get("oldName", "")
     new_name = body.get("newName", "")
+    if (item.GetFusionCompNameList() or []).count(old_name) != 1:
+        raise ValueError("Composition name must identify one item")
     if not old_name or not new_name:
         return {"error": "oldName and newName are required"}
+    if new_name in (item.GetFusionCompNameList() or []):
+        raise ValueError("The new composition name already exists")
     ok = item.RenameFusionCompByName(old_name, new_name)
     return {"success": bool(ok)}
 
@@ -2213,11 +2480,18 @@ def action_add_take(body):
     return {"success": bool(ok)}
 
 
+def _take_index(item, body):
+    index = body.get("takeIndex")
+    if type(index) is not int or not 1 <= index <= (item.GetTakesCount() or 0):
+        raise ValueError("Take index is out of range")
+    return index
+
+
 def action_select_take(body):
     item, err = _clip_at(body)
     if err:
         return err
-    idx = int(body.get("takeIndex", 1))
+    idx = _take_index(item, body)
     ok = item.SelectTakeByIndex(idx)
     return {"success": bool(ok), "takeIndex": idx}
 
@@ -2226,7 +2500,7 @@ def action_delete_take(body):
     item, err = _clip_at(body)
     if err:
         return err
-    idx = int(body.get("takeIndex", 1))
+    idx = _take_index(item, body)
     ok = item.DeleteTakeByIndex(idx)
     return {"success": bool(ok), "takeIndex": idx}
 
@@ -2235,6 +2509,10 @@ def action_finalize_take(body):
     item, err = _clip_at(body)
     if err:
         return err
+    if "takeIndex" in body:
+        index = _take_index(item, body)
+        if item.GetSelectedTakeIndex() != index:
+            raise ValueError("Select the requested take before finalizing it")
     ok = item.FinalizeTake()
     return {"success": bool(ok)}
 
@@ -2299,7 +2577,10 @@ def action_set_clip_cache(body):
     if err:
         return err
     cache_type = body.get("cacheType", "color")
-    cache_value = int(body.get("cacheValue", 1))
+    cache_value = body.get("cacheValue", 1)
+    allowed = {"color": {0, 1}, "fusion": {-1, 0, 1}}
+    if type(cache_value) is not int or cache_value not in allowed.get(cache_type, ()):
+        raise ValueError("Invalid cache type or state")
     if cache_type == "fusion":
         ok = item.SetFusionOutputCache(cache_value)
     else:
@@ -2395,6 +2676,8 @@ def action_load_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     if not pm:
         return {"error": "No project manager"}
     name = body.get("projectName", "")
@@ -2411,6 +2694,8 @@ def action_create_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     if not pm:
         return {"error": "No project manager"}
     name = body.get("projectName", "")
@@ -2427,6 +2712,8 @@ def action_delete_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     name = body.get("projectName", "")
     if not name:
         return {"error": "projectName is required"}
@@ -2439,6 +2726,8 @@ def action_archive_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     name = body.get("projectName", "")
     file_path = body.get("filePath", "")
     if not name or not file_path:
@@ -2446,6 +2735,7 @@ def action_archive_project(body):
     src_media = body.get("archiveSrcMedia", True)
     render_cache = body.get("archiveRenderCache", True)
     proxy_media = body.get("archiveProxyMedia", False)
+    _new_export_path(file_path)
     ok = pm.ArchiveProject(name, file_path, src_media, render_cache, proxy_media)
     return {"success": bool(ok)}
 
@@ -2455,11 +2745,14 @@ def action_export_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     name = body.get("projectName", "")
     file_path = body.get("filePath", "")
     if not name or not file_path:
         return {"error": "projectName and filePath are required"}
     with_stills = body.get("withStillsAndLUTs", True)
+    _new_export_path(file_path)
     ok = pm.ExportProject(name, file_path, with_stills)
     return {"success": bool(ok)}
 
@@ -2469,6 +2762,8 @@ def action_import_project(body):
     if err:
         return err
     pm = r.GetProjectManager()
+    if "databaseName" in body:
+        _check_current_database(pm, body["databaseName"])
     file_path = body.get("filePath", "")
     if not file_path:
         return {"error": "filePath is required"}
@@ -2499,16 +2794,34 @@ def action_navigate_project_folder(body):
     return {"success": bool(ok), "action": action}
 
 
+def _database_by_name(manager, name):
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Database name is required")
+    matches = [db for db in manager.GetDatabaseList() or [] if db.get("DbName") == name]
+    if len(matches) != 1 or matches[0].get("DbType") not in ("Disk", "PostgreSQL"):
+        raise ValueError("Database name does not identify one supported database")
+    return matches[0]
+
+
+def _check_current_database(manager, name):
+    expected = _database_by_name(manager, name)
+    current = manager.GetCurrentDatabase() or {}
+    keys = ("DbName", "DbType", "IpAddress")
+    if any(current.get(key, "") != expected.get(key, "") for key in keys):
+        raise ValueError("Requested database is not current")
+
+
 def action_set_database(body):
     r, err = _resolve()
     if err:
         return err
     pm = r.GetProjectManager()
-    db_info = body.get("dbInfo", {})
+    if "databaseName" in body and "dbInfo" in body:
+        raise ValueError("Choose one database selector")
+    db_info = _database_by_name(pm, body["databaseName"]) if "databaseName" in body else body.get("dbInfo")
     if not db_info:
-        return {"error": "dbInfo dict required with keys DbType, DbName, optional IpAddress"}
-    ok = pm.SetCurrentDatabase(db_info)
-    return {"success": bool(ok)}
+        raise ValueError("A database selector is required")
+    return {"success": bool(pm.SetCurrentDatabase(db_info))}
 
 
 # -- Resolve-level / Presets / MediaStorage ----------------------------------
@@ -2622,20 +2935,48 @@ def action_set_render_mode(body):
     _, proj, err = _project()
     if err:
         return err
-    mode = int(body.get("renderMode", 0))
-    ok = proj.SetCurrentRenderMode(mode)
-    return {"success": bool(ok), "renderMode": mode}
+    if "mode" in body and "renderMode" in body:
+        raise ValueError("Provide one render mode")
+    mode = {"single": 1, "individual_clips": 0}.get(body["mode"]) if "mode" in body else body.get("renderMode")
+    if type(mode) is not int or mode not in (0, 1):
+        raise ValueError("Invalid render mode")
+    return {"success": bool(proj.SetCurrentRenderMode(mode)), "renderMode": mode}
+
+
+def _render_job_ids(project):
+    jobs = project.GetRenderJobList() or []
+    ids = [job.get("JobId") for job in jobs]
+    if any(not isinstance(job_id, str) or not job_id for job_id in ids) or len(set(ids)) != len(ids):
+        raise ValueError("Resolve returned invalid render job identifiers")
+    return ids
+
+
+def _render_job_id(project, body):
+    if ("jobIndex" in body) == ("jobId" in body):
+        raise ValueError("Provide one render job selector")
+    if "jobId" in body:
+        job_id = body["jobId"]
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("Invalid render job identifier")
+        return job_id
+    raw_index = body["jobIndex"]
+    if isinstance(raw_index, str) and re.fullmatch(r"[0-9]+", raw_index):
+        raw_index = int(raw_index)
+    ids = _render_job_ids(project)
+    if type(raw_index) is not int or not 0 <= raw_index < len(ids):
+        raise ValueError("Render job index is out of range")
+    return ids[raw_index]
 
 
 def action_get_render_job_status(body):
     _, proj, err = _project()
     if err:
         return err
-    job_id = body.get("jobId", "")
-    if not job_id:
-        return {"error": "jobId is required"}
-    status = safe(lambda: proj.GetRenderJobStatus(job_id))
-    return {"jobId": job_id, "status": status or {}}
+    job_id = _render_job_id(proj, body)
+    status = proj.GetRenderJobStatus(job_id)
+    if not isinstance(status, dict) or not status:
+        return {"error": "Render job status unavailable"}
+    return {"jobId": job_id, "status": status}
 
 
 def action_refresh_lut_list(body):
@@ -2905,7 +3246,7 @@ POST_ROUTES = {
 POST_ALLOWED_FIELDS = {
     '/bridge/shutdown': ('projectName', 'timelineName'),
     '/page': ('page', 'projectName', 'timelineName'),
-    '/playhead': ('projectName', 'timecode', 'timelineName'),
+    '/playhead': ('frame', 'projectName', 'timecode', 'timelineName'),
     '/marker/add': ('color', 'customData', 'duration', 'frameId', 'name', 'note', 'projectName', 'timelineName'),
     '/marker/delete': ('color', 'frameId', 'projectName', 'timelineName'),
     '/timeline/switch': ('index', 'projectName', 'timelineName'),
@@ -2915,16 +3256,16 @@ POST_ALLOWED_FIELDS = {
     '/timeline/export': ('exportSubtype', 'exportType', 'fileName', 'projectName', 'timelineName'),
     '/timeline/mark-in-out': ('markIn', 'markOut', 'projectName', 'timelineName', 'type'),
     '/timeline/clear-mark-in-out': ('projectName', 'timelineName', 'type'),
-    '/timeline/clips/delete': ('clips', 'projectName', 'ripple', 'timelineName'),
-    '/timeline/clips/link': ('clips', 'linked', 'projectName', 'timelineName'),
-    '/timeline/compound-clip': ('clips', 'name', 'projectName', 'startTimecode', 'timelineName'),
-    '/timeline/fusion-clip': ('clips', 'projectName', 'timelineName'),
-    '/track/add': ('projectName', 'subTrackType', 'timelineName', 'trackType'),
+    '/timeline/clips/delete': ('clipNames', 'clips', 'projectName', 'ripple', 'timelineName', 'trackIndex', 'trackType'),
+    '/timeline/clips/link': ('clipNames', 'clips', 'linked', 'projectName', 'timelineName'),
+    '/timeline/compound-clip': ('clipNames', 'clips', 'name', 'projectName', 'startTimecode', 'timelineName'),
+    '/timeline/fusion-clip': ('clipNames', 'clips', 'name', 'projectName', 'timelineName'),
+    '/track/add': ('projectName', 'subTrackType', 'timelineName', 'trackIndex', 'trackType'),
     '/track/delete': ('projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/track/enable': ('enabled', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/track/lock': ('locked', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/track/rename': ('name', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
-    '/media/import': ('filePaths', 'projectName', 'timelineName'),
+    '/media/import': ('filePaths', 'folderPath', 'projectName', 'timelineName'),
     '/media/import-storage': ('filePaths', 'projectName', 'timelineName'),
     '/media/append': ('clipName', 'endFrame', 'mediaType', 'projectName', 'recordFrame', 'startFrame', 'timelineName', 'trackIndex', 'trackType'),
     '/media/insert': ('clipName', 'endFrame', 'mediaType', 'projectName', 'recordFrame', 'startFrame', 'timelineName', 'trackIndex'),
@@ -2966,9 +3307,9 @@ POST_ALLOWED_FIELDS = {
     '/color/group/delete': ('groupName', 'projectName', 'timelineName'),
     '/color/group/assign': ('clipIndex', 'clipName', 'clip_name', 'groupName', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/color/group/remove': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
-    '/clip/fusion/add': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
+    '/clip/fusion/add': ('clipIndex', 'clipName', 'clip_name', 'compName', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/fusion/import': ('clipIndex', 'clipName', 'clip_name', 'path', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
-    '/clip/fusion/export': ('clipIndex', 'clipName', 'clip_name', 'compIndex', 'path', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
+    '/clip/fusion/export': ('clipIndex', 'clipName', 'clip_name', 'compIndex', 'compName', 'path', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/fusion/delete': ('clipIndex', 'clipName', 'clip_name', 'compName', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/fusion/load': ('clipIndex', 'clipName', 'clip_name', 'compName', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/fusion/rename': ('clipIndex', 'clipName', 'clip_name', 'newName', 'oldName', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
@@ -2982,7 +3323,7 @@ POST_ALLOWED_FIELDS = {
     '/clip/take/add': ('clipIndex', 'clipName', 'clip_name', 'endFrame', 'mediaPoolClipName', 'projectName', 'startFrame', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/take/select': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'takeIndex', 'timelineName', 'trackIndex', 'trackType'),
     '/clip/take/delete': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'takeIndex', 'timelineName', 'trackIndex', 'trackType'),
-    '/clip/take/finalize': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'timelineName', 'trackIndex', 'trackType'),
+    '/clip/take/finalize': ('clipIndex', 'clipName', 'clip_name', 'projectName', 'takeIndex', 'timelineName', 'trackIndex', 'trackType'),
     '/mediapool/proxy/link': ('clipName', 'projectName', 'proxyMediaFilePath', 'timelineName'),
     '/mediapool/proxy/unlink': ('clipName', 'projectName', 'timelineName'),
     '/mediapool/clip/replace': ('clipName', 'filePath', 'projectName', 'timelineName'),
@@ -2993,40 +3334,40 @@ POST_ALLOWED_FIELDS = {
     '/render/format': ('codec', 'format', 'projectName', 'timelineName'),
     '/render/formats': ('format', 'projectName', 'timelineName'),
     '/render/job/add': ('outputPath', 'preset', 'projectName', 'renderRange', 'timelineName'),
-    '/render/job/status': ('jobId', 'projectName', 'timelineName'),
+    '/render/job/status': ('jobId', 'jobIndex', 'projectName', 'timelineName'),
     '/render/start': ('jobIds', 'projectName', 'timelineName'),
     '/render/stop': ('projectName', 'timelineName'),
-    '/render/job/delete': ('all', 'jobId', 'projectName', 'timelineName'),
-    '/render/mode': ('projectName', 'renderMode', 'timelineName'),
+    '/render/job/delete': ('all', 'jobId', 'jobIndex', 'projectName', 'timelineName'),
+    '/render/mode': ('mode', 'projectName', 'renderMode', 'timelineName'),
     '/render/quick-export': ('params', 'presetName', 'projectName', 'timelineName'),
     '/render/refresh-luts': ('projectName', 'timelineName'),
     '/render/preset': ('action', 'presetName', 'presetPath', 'projectName', 'timelineName'),
     '/project/save': ('projectName', 'timelineName'),
     '/project/setting': ('key', 'projectName', 'setting', 'timelineName', 'value'),
     '/timeline/setting': ('key', 'projectName', 'setting', 'timelineName', 'value'),
-    '/project/export-frame': ('filePath', 'projectName', 'timelineName'),
+    '/project/export-frame': ('filePath', 'format', 'projectName', 'timelineName'),
     '/timeline/subtitles': ('projectName', 'settings', 'timelineName'),
     '/timeline/scene-cuts': ('projectName', 'timelineName'),
-    '/projects/load': ('projectName', 'timelineName'),
-    '/projects/create': ('projectName', 'timelineName'),
-    '/projects/delete': ('projectName', 'timelineName'),
-    '/projects/archive': ('archiveProxyMedia', 'archiveRenderCache', 'archiveSrcMedia', 'filePath', 'projectName', 'timelineName'),
-    '/projects/export': ('filePath', 'projectName', 'timelineName', 'withStillsAndLUTs'),
-    '/projects/import': ('filePath', 'projectName', 'timelineName'),
+    '/projects/load': ('databaseName', 'projectName', 'timelineName'),
+    '/projects/create': ('databaseName', 'projectName', 'timelineName'),
+    '/projects/delete': ('databaseName', 'projectName', 'timelineName'),
+    '/projects/archive': ('archiveProxyMedia', 'archiveRenderCache', 'archiveSrcMedia', 'databaseName', 'filePath', 'projectName', 'timelineName'),
+    '/projects/export': ('databaseName', 'filePath', 'projectName', 'timelineName', 'withStillsAndLUTs'),
+    '/projects/import': ('databaseName', 'filePath', 'projectName', 'timelineName'),
     '/projects/folder': ('action', 'folderName', 'projectName', 'timelineName'),
-    '/projects/database': ('dbInfo', 'projectName', 'timelineName'),
+    '/projects/database': ('databaseName', 'dbInfo', 'projectName', 'timelineName'),
     '/resolve/layout-preset': ('action', 'presetFilePath', 'presetName', 'projectName', 'timelineName'),
     '/resolve/burnin-preset': ('action', 'presetName', 'presetPath', 'projectName', 'timelineName'),
     '/resolve/keyframe-mode': ('mode', 'projectName', 'timelineName'),
     '/media-storage/reveal': ('path', 'projectName', 'timelineName'),
-    '/gallery/album/set': ('albumIndex', 'albumType', 'projectName', 'timelineName'),
+    '/gallery/album/set': ('albumIndex', 'albumName', 'albumType', 'projectName', 'timelineName'),
     '/gallery/album/create': ('albumType', 'name', 'projectName', 'timelineName'),
-    '/gallery/grab': ('projectName', 'timelineName'),
-    '/gallery/grab-all': ('projectName', 'stillFrameSource', 'timelineName'),
-    '/gallery/stills/export': ('albumIndex', 'albumType', 'filePrefix', 'folderPath', 'format', 'projectName', 'stillIndices', 'timelineName'),
-    '/gallery/stills/import': ('filePaths', 'projectName', 'timelineName'),
-    '/gallery/stills/delete': ('albumIndex', 'albumType', 'projectName', 'stillIndices', 'timelineName'),
-    '/gallery/stills/label': ('label', 'projectName', 'stillIndex', 'timelineName'),
+    '/gallery/grab': ('albumName', 'label', 'projectName', 'timelineName'),
+    '/gallery/grab-all': ('albumName', 'projectName', 'stillFrameSource', 'timelineName'),
+    '/gallery/stills/export': ('albumIndex', 'albumName', 'albumType', 'filePrefix', 'folderPath', 'format', 'projectName', 'stillIndices', 'timelineName'),
+    '/gallery/stills/import': ('albumName', 'filePaths', 'projectName', 'timelineName'),
+    '/gallery/stills/delete': ('albumIndex', 'albumName', 'albumType', 'projectName', 'stillIndices', 'stillLabels', 'timelineName'),
+    '/gallery/stills/label': ('albumName', 'label', 'newLabel', 'projectName', 'stillIndex', 'stillLabel', 'timelineName'),
 }
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -3078,10 +3419,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
-        qs = parse_qs(parsed.query)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
         handler = GET_ROUTES.get(path)
         if handler:
             try:
+                if any(len(values) != 1 for values in qs.values()):
+                    raise ValueError("Duplicate query parameter")
                 _validate_context({key: values[0] for key, values in qs.items()})
                 if "clip_name" in qs and path in {
                     "/clip/markers", "/clip/flags", "/clip/node-graph", "/clip/color-versions",
@@ -3133,8 +3476,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if set(body) - set(POST_ALLOWED_FIELDS[path]):
                     self._error(422, "Unsupported operation parameters; request was not executed")
                     return
-                if not path.startswith("/projects/") and path != "/timeline/switch":
-                    _validate_context(body)
+                if path.startswith("/projects/"):
+                    if "timelineName" in body or ("projectName" in body and path in {"/projects/database", "/projects/folder"}):
+                        raise ValueError("Project manager route cannot use this context")
+                else:
+                    context = {key: value for key, value in body.items() if key != "timelineName"} if path == "/timeline/switch" else body
+                    _validate_context(context)
                 self._respond(handler(body))
             except (ValueError, TypeError, KeyError):
                 self._error(400, "Invalid operation parameters")

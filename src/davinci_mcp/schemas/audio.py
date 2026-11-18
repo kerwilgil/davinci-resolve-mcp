@@ -91,7 +91,7 @@ ADD_TAKE = create_tool_schema(
     mode=ToolMode.WRITE,
     properties={
         "clip_name": CommonParams.CLIP_NAME,
-        "take_name": {"type": "string", "description": "Take name"},
+        "take_name": {"type": "string", "description": "Unique media pool clip name to use as a take"},
     },
     required=["clip_name", "take_name"],
 )
@@ -122,7 +122,7 @@ DELETE_TAKE = create_tool_schema(
 
 FINALIZE_TAKE = create_tool_schema(
     name="finalize_take",
-    description="Finalize a take (make it the active take)",
+    description="Finalize the requested take after it has been selected",
     category=ToolCategory.AUDIO,
     mode=ToolMode.WRITE,
     properties={
@@ -174,7 +174,8 @@ SET_CLIP_CACHE = create_tool_schema(
     mode=ToolMode.WRITE,
     properties={
         "clip_name": CommonParams.CLIP_NAME,
-        "cache_mode": {"type": "string", "description": "Cache mode", "enum": ["none", "proxy", "optimized"]},
+        "cache_mode": {"type": "string", "description": "Output cache state; auto applies only to Fusion", "enum": ["enabled", "disabled", "auto"]},
+        "cache_type": {"type": "string", "description": "Output cache to change (default color)", "enum": ["color", "fusion"]},
     },
     required=["clip_name", "cache_mode"],
 )

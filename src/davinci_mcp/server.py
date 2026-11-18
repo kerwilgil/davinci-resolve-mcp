@@ -16,8 +16,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 
+from .availability import EXPERIMENTAL_TOOLS, SUPPORTED_TOOLS, UNAVAILABLE_TOOLS
 from .config import ServerConfig, get_server_config, get_bridge_config
 from .bridge import BridgeClient
+from .errors import DaVinciMCPError
 from .tools import ToolRegistry
 from .schemas import VERIFIED_TOOLS, get_write_tools, get_read_tools, ToolCategory
 
@@ -41,6 +43,9 @@ class DaVinciMCPServer:
         self.bridge_client = BridgeClient(self.bridge_config)
         self.tool_registry = ToolRegistry(self.bridge_client, read_only=read_only)
 
+        self.exposed_tools = SUPPORTED_TOOLS
+        if self.server_config.enable_experimental:
+            self.exposed_tools = self.exposed_tools | EXPERIMENTAL_TOOLS
         self._register_mcp_tools()
 
     def _register_mcp_tools(self) -> None:
@@ -50,14 +55,27 @@ class DaVinciMCPServer:
         @self.mcp.list_tools()
         async def list_tools():
             return [
-                Tool(name=name, description=get_schema(name).description,
+                Tool(name=name, description=(
+                    "EXPERIMENTAL: " if name in EXPERIMENTAL_TOOLS else ""
+                ) + get_schema(name).description,
                      inputSchema={**get_schema(name).parameters,
                                   "required": get_schema(name).required})
-                for name in self.tool_registry.list_tools()
+                for name in self.get_tool_list()
             ]
 
-        @self.mcp.call_tool()
+        @self.mcp.call_tool(validate_input=False)
         async def call_tool(name, arguments):
+            if name in UNAVAILABLE_TOOLS:
+                error = DaVinciMCPError("This tool has no bridge implementation", "TOOL_UNAVAILABLE")
+            elif name in EXPERIMENTAL_TOOLS and name not in self.exposed_tools:
+                error = DaVinciMCPError("Experimental tool is disabled", "TOOL_EXPERIMENTAL_DISABLED")
+            else:
+                error = None
+            if error is not None:
+                return CallToolResult(
+                    content=[TextContent(type="text", text=json.dumps(error.to_dict()))],
+                    isError=True,
+                )
             result = await self.tool_registry.execute(name, arguments or {})
             data = result.data if result.success else result.error.to_dict()
             return CallToolResult(
@@ -67,27 +85,27 @@ class DaVinciMCPServer:
 
     def get_tool_list(self) -> list[str]:
         """Get list of all registered tools."""
-        return self.tool_registry.list_tools()
+        return [name for name in self.tool_registry.list_tools() if name in self.exposed_tools]
 
     def get_verified_tools(self) -> list[str]:
         """Get list of verified tools."""
-        return self.tool_registry.list_verified_tools()
+        return [name for name in self.get_tool_list() if name in SUPPORTED_TOOLS]
 
     def get_write_tools(self) -> list[str]:
         """Get list of write tools."""
-        return [name for name in self.tool_registry.list_tools()
+        return [name for name in self.get_tool_list()
                 if name in get_write_tools()]
 
     def get_read_tools(self) -> list[str]:
         """Get list of read tools."""
-        return [name for name in self.tool_registry.list_tools()
+        return [name for name in self.get_tool_list()
                 if name in get_read_tools()]
 
     def get_tools_by_category(self, category: ToolCategory) -> list[str]:
         """Get tools by category."""
         from .schemas import get_tools_by_category
         return [name for name in get_tools_by_category(category)
-                if self.tool_registry.has_tool(name)]
+                if name in self.exposed_tools and self.tool_registry.has_tool(name)]
 
     async def connect(self) -> bool:
         """Connect to the bridge."""

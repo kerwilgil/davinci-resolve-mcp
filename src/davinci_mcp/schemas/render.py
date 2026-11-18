@@ -71,7 +71,8 @@ START_RENDERING = create_tool_schema(
     category=ToolCategory.RENDER,
     mode=ToolMode.WRITE,
     properties={
-        "wait_for_completion": {"type": "boolean", "description": "Wait for all jobs to complete", "default": False},
+        "wait_for_completion": {"type": "boolean", "description": "Poll accepted job IDs to completion", "default": False},
+        "completion_timeout": {"type": "number", "description": "Seconds to wait after acceptance (default 30)", "minimum": 0.1, "maximum": 600},
     },
 )
 
@@ -89,9 +90,10 @@ DELETE_RENDER_JOB = create_tool_schema(
     category=ToolCategory.RENDER,
     mode=ToolMode.WRITE,
     properties={
-        "job_index": {"type": "integer", "description": "Job index in queue", "minimum": 0},
+        "job_index": {"type": "integer", "description": "Zero-based index in the current queue", "minimum": 0},
+        "job_id": {"type": "string", "description": "Stable Resolve job ID; prefer for deletion", "minLength": 1},
     },
-    required=["job_index"],
+    required=[],
 )
 
 GET_RENDER_JOB_STATUS = create_tool_schema(
@@ -100,9 +102,10 @@ GET_RENDER_JOB_STATUS = create_tool_schema(
     category=ToolCategory.RENDER,
     mode=ToolMode.READ,
     properties={
-        "job_index": {"type": "integer", "description": "Job index in queue", "minimum": 0},
+        "job_index": {"type": "integer", "description": "Zero-based index in the current queue", "minimum": 0},
+        "job_id": {"type": "string", "description": "Stable Resolve job ID; prefer for deletion", "minLength": 1},
     },
-    required=["job_index"],
+    required=[],
     returns={"type": "object"},
 )
 

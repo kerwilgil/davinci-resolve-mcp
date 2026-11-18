@@ -1,27 +1,20 @@
-# 1.0.0 — first public release candidate (unpublished)
+# DaVinci Resolve MCP 1.0.0 candidate
 
-**Status: BLOCKED.** Review [validation and remaining work](RELEASE_VALIDATION.md)
-before approving a tag or release.
+The first public candidate installs as a Python package and exposes 36 supported
+tools over MCP stdio. The default scope covers project and timeline inspection,
+media import, selected edits and exports, render control, and validated gallery,
+take and cache operations. The [manifest](manifests/tool-manifest.json) lists
+119 opt-in experimental tools and seven unavailable ML tools.
 
-This candidate secures the local HTTP bridge with mandatory bearer authentication,
-removes browser/CORS access and internal trace disclosure, and prevents automatic
-replay of mutations. Communication failures after POST report an unknown outcome.
+The loopback bridge requires authentication and rejects browser-origin requests.
+Mutations are submitted once. If render completion cannot be confirmed, the
+server reports an unknown outcome and returns the accepted job IDs when known.
+Named selectors and export destinations are checked before sensitive operations.
 
-The project now installs as a Python package with a console entry point and module
-launch. MCP stdio publishes real schemas for 162 declared tools. Route mappings,
-JSON validation, context selection and several core write contracts are corrected.
-Seven unimplemented ML tools return an explicit unavailable error. Unsupported
-mutation options are rejected before execution.
+Use the [installation instructions](README.md) to install the locked core and
+configure the bridge token. The Windows helper retains previous installation and
+configuration state on failure. The source distribution includes the helper,
+bridge script, manifest and release documentation. Build metadata declares MIT.
 
-The Windows helper preserves existing server options and unrelated configuration,
-backs up installations and restores previous files/configuration on failure.
-Core dependencies are hash-locked for multiple platforms; MCP is updated to 1.30.0.
-
-Install from the reviewed checkout using the commands in [README](README.md).
-Configure the same private `DAVINCI_BRIDGE_TOKEN` in Resolve and the MCP client.
-Stop the old unauthenticated bridge before upgrading. Do not put credentials in
-source control. After a mutation timeout inspect Resolve before manually retrying.
-
-Real Resolve, Free/Studio compatibility, the real Claude CLI and several argument
-adapters remain pending. No packages, tags, releases or installer binaries were
-published. MIT license retained.
+Physical Resolve testing is **PENDING**. Follow the disposable-project checklist
+before claiming version or edition compatibility. [Validation](RELEASE_VALIDATION.md)

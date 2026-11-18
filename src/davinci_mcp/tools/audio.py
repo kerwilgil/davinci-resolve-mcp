@@ -140,7 +140,7 @@ async def set_clip_cache(arguments: dict, request_id: str | None = None) -> Tool
     """Set clip cache."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("set_clip_cache", clip_name=arguments["clip_name"], cache_mode=arguments["cache_mode"])
+    result = client.call_tool_simple("set_clip_cache", clip_name=arguments["clip_name"], cache_mode=arguments["cache_mode"], cache_type=arguments.get("cache_type"))
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result

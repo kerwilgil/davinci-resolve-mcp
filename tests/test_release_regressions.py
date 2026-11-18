@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from src.davinci_mcp.availability import EXPERIMENTAL_TOOLS, SUPPORTED_TOOLS
 from src.davinci_mcp.bridge import BridgeClient, BridgeMethod, BridgeRequest, HTTPTransport, ToolCall
 from src.davinci_mcp.bridge.protocol import TOOL_TO_ENDPOINT, UNAVAILABLE_TOOLS
 from src.davinci_mcp.config import BridgeConfig
@@ -114,8 +115,8 @@ class BridgeHTTPTests(unittest.TestCase):
         with patch.object(self.bridge, "resolve_obj", resolve):
             status, _, _ = self.request("POST", "/projects/delete", json.dumps({"projectName": "disposable", "databaseName": "other"}),
                 {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
-        self.assertEqual(status, 422)
-        resolve.GetProjectManager.assert_not_called()
+        self.assertEqual(status, 400)
+        resolve.GetProjectManager.return_value.DeleteProject.assert_not_called()
 
     def test_start_without_token_fails_closed(self):
         with patch.dict(os.environ, {"DAVINCI_BRIDGE_TOKEN": ""}):
@@ -155,7 +156,13 @@ class BridgeHTTPTests(unittest.TestCase):
         project, pool, clip = Mock(), Mock(), Mock()
         project.GetMediaPool.return_value = pool
         clip.GetName.return_value = "source.mov"
+        clip.GetClipProperty.return_value = "24"
+        timeline = project.GetCurrentTimeline.return_value
+        timeline.GetStartFrame.return_value = 0
+        timeline.GetTrackCount.return_value = 2
+        timeline.GetIsTrackLocked.return_value = False
         pool.GetRootFolder.return_value.GetClipList.return_value = [clip]
+        pool.GetRootFolder.return_value.GetSubFolderList.return_value = []
         pool.AppendToTimeline.return_value = [Mock()]
         resolve = Mock()
         resolve.GetProjectManager.return_value.GetCurrentProject.return_value = project
@@ -163,7 +170,7 @@ class BridgeHTTPTests(unittest.TestCase):
             result = BridgeClient(BridgeConfig(port=self.server.server_port, token=TOKEN, max_retries=0)).call_tool(
                 ToolCall("insert_to_timeline", {"clip_name": "source.mov", "track_type": "audio", "track_index": 2, "frame": 120}))
         self.assertTrue(result.success)
-        pool.AppendToTimeline.assert_called_once_with([{"mediaPoolItem": clip, "trackIndex": 2, "recordFrame": 120, "mediaType": 2}])
+        pool.AppendToTimeline.assert_called_once_with([{"mediaPoolItem": clip, "trackIndex": 2, "recordFrame": 120, "mediaType": 2, "startFrame": 0, "endFrame": 23}])
 
     def test_create_timeline_applies_explicit_settings(self):
         project, pool, timeline, resolve = Mock(), Mock(), Mock(), Mock()
@@ -172,9 +179,12 @@ class BridgeHTTPTests(unittest.TestCase):
         timeline.GetTrackCount.return_value = 1
         resolve.GetProjectManager.return_value.GetCurrentProject.return_value = project
         with patch.object(self.bridge, "resolve_obj", resolve):
-            result = self.bridge.action_create_timeline({"name": "disposable-mock", "frameRate": 25,
-                "startTimecode": "01:00:00:00", "videoTracks": 2})
-        self.assertTrue(result["success"])
+            client = BridgeClient(BridgeConfig(port=self.server.server_port, token=TOKEN, max_retries=0))
+            result = asyncio.run(ToolRegistry(client).execute("create_timeline", {
+                "name": "disposable-mock", "frame_rate": 25,
+                "start_timecode": "01:00:00:00", "video_tracks": 2,
+            }))
+        self.assertTrue(result.success, result.error)
         timeline.SetSetting.assert_any_call("timelineFrameRate", "25")
         timeline.SetStartTimecode.assert_called_once_with("01:00:00:00")
         timeline.AddTrack.assert_called_once_with("video")
@@ -289,13 +299,18 @@ class InstalledStdioTests(unittest.IsolatedAsyncioTestCase):
         for command, args in ((sys.executable, ["-m", "davinci_mcp.server"]),
                               (str(Path(sysconfig.get_path("scripts")) / ("davinci-resolve-mcp.exe" if os.name == "nt" else "davinci-resolve-mcp")), [])):
             with tempfile.TemporaryDirectory() as directory:
-                params = StdioServerParameters(command=command, args=args, cwd=directory, env={"DAVINCI_BRIDGE_MAX_RETRIES": "0", "DAVINCI_BRIDGE_TIMEOUT": "0.1"})
+                params = StdioServerParameters(command=command, args=args, cwd=directory, env={"DAVINCI_BRIDGE_MAX_RETRIES": "0", "DAVINCI_BRIDGE_TIMEOUT": "0.1", "DAVINCI_MCP_ENABLE_EXPERIMENTAL": "0"})
                 async with asyncio.timeout(20):
                     async with stdio_client(params) as (read, write):
                         async with ClientSession(read, write) as session:
                             await session.initialize()
                             tools = (await session.list_tools()).tools
-                            self.assertEqual({tool.name for tool in tools}, set(ALL_SCHEMAS))
+                            self.assertEqual({tool.name for tool in tools}, SUPPORTED_TOOLS)
+                            for name, code in (("transcribe_file", "TOOL_UNAVAILABLE"),
+                                               ("insert_title", "TOOL_EXPERIMENTAL_DISABLED")):
+                                excluded = await session.call_tool(name, {})
+                                self.assertTrue(excluded.isError)
+                                self.assertEqual(json.loads(excluded.content[0].text)["error"]["code"], code)
                             for tool in tools:
                                 schema = ALL_SCHEMAS[tool.name]
                                 self.assertEqual(tool.inputSchema, {**schema.parameters, "required": schema.required})
@@ -303,3 +318,16 @@ class InstalledStdioTests(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(bad.isError)
                             disconnected = await session.call_tool("get_resolve_status", {})
                             self.assertTrue(disconnected.isError)
+
+    async def test_opt_in_tools_are_labeled_and_ml_stays_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            params = StdioServerParameters(command=sys.executable, args=["-m", "davinci_mcp.server"],
+                cwd=directory, env={"DAVINCI_MCP_ENABLE_EXPERIMENTAL": "1"})
+            async with asyncio.timeout(20):
+                async with stdio_client(params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+                        self.assertEqual(set(tools), SUPPORTED_TOOLS | EXPERIMENTAL_TOOLS)
+                        self.assertTrue(all(tools[name].description.startswith("EXPERIMENTAL:")
+                                            for name in EXPERIMENTAL_TOOLS))

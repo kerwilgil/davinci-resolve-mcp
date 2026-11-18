@@ -52,7 +52,7 @@ class HTTPTransport:
         self.stats = TransportStats()
         self._opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
 
-    def send(self, bridge_request: BridgeRequest) -> BridgeResponse:
+    def send(self, bridge_request: BridgeRequest, *, timeout: float | None = None) -> BridgeResponse:
         """Send a request to the bridge and return the response."""
         url = f"{self.config.base_url}{bridge_request.path}"
         request_id = bridge_request.request_id or str(uuid.uuid4())[:8]
@@ -85,10 +85,11 @@ class HTTPTransport:
         start_time = time.perf_counter()
         last_exception: Optional[Exception] = None
 
-        retries = self.config.max_retries if bridge_request.method == BridgeMethod.GET else 0
+        retries = self.config.max_retries if bridge_request.method == BridgeMethod.GET and timeout is None else 0
+        timeout = self.config.timeout if timeout is None else min(timeout, self.config.timeout)
         for attempt in range(retries + 1):
             try:
-                with self._opener.open(req, timeout=self.config.timeout) as resp:
+                with self._opener.open(req, timeout=timeout) as resp:
                     response_data = resp.read()
                     latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -135,7 +136,7 @@ class HTTPTransport:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 self.stats.record_request(latency_ms, False)
                 if isinstance(e.reason, TimeoutError):
-                    last_exception = BridgeTimeoutError(timeout=self.config.timeout, endpoint=bridge_request.path)
+                    last_exception = BridgeTimeoutError(timeout=timeout, endpoint=bridge_request.path)
                 else:
                     last_exception = BridgeConnectionError(
                         "Failed to connect to bridge",
@@ -147,8 +148,8 @@ class HTTPTransport:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 self.stats.record_request(latency_ms, False)
                 last_exception = BridgeTimeoutError(
-                    f"Request timed out after {self.config.timeout}s",
-                    timeout=self.config.timeout,
+                    f"Request timed out after {timeout}s",
+                    timeout=timeout,
                     endpoint=bridge_request.path,
                 )
 

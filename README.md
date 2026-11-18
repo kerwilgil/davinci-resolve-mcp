@@ -2,9 +2,9 @@
 
 A local MCP server for DaVinci Resolve automation. MIT licensed.
 
-**Release candidate 1.0.0 — BLOCKED.** Installation and protocol tests are
-separate from real Resolve compatibility. See [validation evidence and remaining
-blockers](RELEASE_VALIDATION.md) before using this with valuable projects.
+**Release candidate 1.0.0.** Automated contract tests cover the default tool set.
+Validation in the Resolve application remains pending. See the
+[validation evidence and disposable-project procedure](RELEASE_VALIDATION.md).
 
 The MCP client communicates over stdio with the installed Python package, which
 sends authenticated HTTP requests to `CursorBridge.py` inside Resolve. The bridge
@@ -108,30 +108,36 @@ when upgrading; replace it and restart Resolve before using the new MCP client.
 | `DAVINCI_MCP_NAME` | `davinci-resolve` | Server name |
 | `DAVINCI_MCP_VERSION` | `1.0.0` | MCP server version |
 | `DAVINCI_MCP_DESCRIPTION` | package description | Server description |
+| `DAVINCI_MCP_ENABLE_EXPERIMENTAL` | `0` | Set to `1` to expose explicitly labeled experimental tools |
 
 Bridge version `2.0.0` identifies its existing HTTP API, independently of package
 version `1.0.0`.
 
 ## Tool support and errors
 
-There are 162 declared tools across nine domains. MCP discovery exposes their
-real properties and required arguments; the registry validates JSON Schema,
-including nested values, patterns, enums and bounds. Registration, schema presence
-and endpoint coverage do **not** prove a Resolve operation works. The manifest's
-historical `verified_tools` field is a declaration list, not physical test evidence.
-Its `verification_status` remains `PENDING`.
+MCP discovers **36 supported tools** by default. The manifest lists these tools,
+119 experimental tools available by opt-in, and seven unavailable ML tools.
+The supported label reflects automated testing against the documented Resolve
+API. Edition and version compatibility remain pending physical validation.
+The historical `verified_tools` manifest field remains for existing consumers.
 
-Seven declared tools have no bridge implementation and return `TOOL_UNAVAILABLE`:
-`voice_isolate`, `voice_isolate_timeline`, `remove_background`,
-`remove_background_video`, `remove_background_clip`, `transcribe_timeline` and
-`transcribe_file`. Installing optional ML extras does not implement them. The
-core installation does not install those extras.
+- `set_playhead(frame)` uses a zero-based offset from timeline start. Media
+  insertion uses the absolute Resolve record frame reported by the timeline.
+- Render selectors accept an index in the current queue or a stable job ID.
+  Prefer the ID for deletion. `start_rendering(wait_for_completion=true)`
+  polls the accepted IDs and has an optional completion timeout in seconds.
+- Named project and timeline contexts must match the active context. An
+  explicitly named project database must already be active. The
+  `set_database` tool switches to a uniquely named database.
+- Clip, album and still selectors must resolve uniquely. The bridge validates
+  entire selections before deleting, linking or merging clips or stills.
+- Title, generator and standalone Fusion insertion at an explicit track and
+  frame are experimental. The documented Resolve methods have no destination
+  track argument. The bridge rejects these placement requests before editing.
+- The seven unimplemented ML tools stay hidden in both discovery modes.
+  Direct MCP calls return `TOOL_UNAVAILABLE`.
 
-Other unresolved argument/endpoint semantic gaps are listed in the validation
-report. Use only disposable projects until they are closed. Named project and
-timeline scopes must match the current context; they do not implicitly switch
-projects. Timeline clip names must resolve uniquely; ambiguous/missing names are
-rejected before mutation.
+See the [tool manifest](manifests/tool-manifest.json) for the complete classification.
 
 Every HTTP route requires authentication, including reads, exports, deletion and
 shutdown. Browser origins and non-local Host headers are rejected; CORS is disabled.
@@ -146,11 +152,12 @@ returned without replaying POST. Only read-only GET requests have bounded retrie
 ## Development and release checks
 
 ```bash
-python -m pip install build setuptools wheel ruff==0.15.7
-python -m build --no-isolation
+python -m pip install build==1.6.1 setuptools==84.2.1 wheel==0.48.0 ruff==0.15.7
+export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+python scripts/build_release.py
 python -m pip install --no-deps dist/davinci_resolve_mcp-1.0.0-py3-none-any.whl
 python -m unittest discover -s tests -v
-ruff check src tests scripts/autostart.py
+ruff check src tests scripts
 ```
 
 Installed-package stdio tests must run after wheel installation. Tests launch a
@@ -163,7 +170,7 @@ and a controlled Claude CLI, audits locked runtime dependencies, and scans Git
 history and the publication tree with redacted Gitleaks output.
 
 See [release notes](RELEASE_NOTES.md) and [validation](RELEASE_VALIDATION.md).
-Do not tag, publish packages, or merge automatically while the release is blocked.
+
 
 ## License
 

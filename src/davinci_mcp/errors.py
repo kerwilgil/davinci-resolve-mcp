@@ -135,9 +135,9 @@ class ErrorResponse:
 class BridgeOutcomeUnknownError(DaVinciMCPError):
     """The server may have committed a mutation before communication failed."""
 
-    def __init__(self):
+    def __init__(self, *, job_ids=None):
         super().__init__(
             "Operation outcome is unknown. Inspect Resolve before retrying; the request was not repeated.",
             "BRIDGE_OUTCOME_UNKNOWN",
-            {"outcome": "unknown", "retry_safe": False},
+            {"outcome": "unknown", "retry_safe": False, **({"jobIds": job_ids} if job_ids else {})},
         )

@@ -18,8 +18,18 @@ All notable changes to this project are documented in this file.
   exercise installer upgrade and injected rollback on Windows CI.
 - Add installed-wheel stdio, loopback authorization and mutation regression tests,
   multi-platform CI and publication/history secret scanning.
-- Release remains blocked by the functional gaps and physical integration checks
-  recorded in RELEASE_VALIDATION.md. No packages, tags or releases published.
+- Physical integration remains pending as recorded in RELEASE_VALIDATION.md.
+
+- Resolve non-drop and 29.97/59.94 drop-frame playhead offsets, zero-based render
+  queue indices, stable job IDs and render mode. Poll accepted jobs with a
+  bounded timeout and report unknown completion without submitting another POST.
+- Verify named database, timeline, clip, album and still selections before
+  effects. Adapt Fusion exports, take operations and color/Fusion output cache.
+- Expose 36 tools by default, with 119 experimental tools explicitly opt-in
+  and seven unimplemented ML tools unavailable. Reject unsupported explicit
+  title, generator and Fusion template placement before editing.
+- Include installer, bridge, manifests and docs in the source distribution.
+  Build repeatable wheel and sdist with pinned tools and a fixed source epoch.
 
 ## Initial implementation — 2026-09-15 (not a published release)
 
