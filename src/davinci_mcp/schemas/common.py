@@ -133,7 +133,7 @@ class CommonParams:
 
     PLAYHEAD_FRAME = {
         "type": "integer",
-        "description": "Playhead position in frames",
+        "description": "Zero-based frame offset from the timeline start",
         "minimum": 0,
     }
 

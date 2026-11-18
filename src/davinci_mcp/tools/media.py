@@ -20,7 +20,7 @@ async def get_media_pool_structure(arguments: dict, request_id: str | None = Non
     """Get media pool structure."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("get_media_pool_structure")
+    result = client.call_tool_simple("get_media_pool_structure", **{key: value for key, value in arguments.items() if key != "_registry"})
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result

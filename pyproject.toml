@@ -4,14 +4,23 @@ version = "1.0.0"
 description = "A local-first Model Context Protocol server for structured DaVinci Resolve automation."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Kerwil Gil", email = "kerwil.gil@up.ac.pa" }
 ]
 
 dependencies = [
-    "mcp==1.28.1",
+    "mcp==1.30.0",
+    "jsonschema==4.26.0",
 ]
+
+[project.scripts]
+davinci-resolve-mcp = "davinci_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["davinci_mcp*"]
 
 [project.optional-dependencies]
 transcription = [
@@ -35,9 +44,10 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-select = ["E", "F", "I", "UP", "W"]
-ignore = ["E501", "UP007"]
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"

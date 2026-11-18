@@ -20,7 +20,10 @@ async def get_timeline_clips(arguments: dict, request_id: str | None = None) -> 
     """Get timeline clips."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("get_timeline_clips", timeline_name=arguments.get("timeline_name"))
+    result = client.call_tool_simple(
+        "get_timeline_clips", timeline_name=arguments.get("timeline_name"),
+        track_type=arguments.get("track_type"), track_index=arguments.get("track_index"),
+    )
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result

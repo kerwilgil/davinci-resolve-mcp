@@ -1,0 +1,5 @@
+include CHANGELOG.md RELEASE_NOTES.md RELEASE_VALIDATION.md
+include requirements.in requirements.lock
+include src/CursorBridge.py
+include examples/mcp.json manifests/tool-manifest.json
+include scripts/autostart.py scripts/install.ps1 scripts/build_release.py tests/test_installer.ps1

@@ -84,7 +84,7 @@ async def export_current_frame(arguments: dict, request_id: str | None = None) -
     """Export current frame as image."""
     registry: ToolRegistry = arguments.get("_registry")
     client = registry.client
-    result = client.call_tool_simple("export_current_frame", file_path=arguments["file_path"], format=arguments.get("format", "png"))
+    result = client.call_tool_simple("export_current_frame", file_path=arguments["file_path"], format=arguments.get("format"))
     if result.success:
         return ToolResult.success_result(result.data, request_id)
     return result

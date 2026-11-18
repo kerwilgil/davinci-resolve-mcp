@@ -2,7 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
-## [1.0.0] - 2026-09-15
+## [Unreleased] — 1.0.0 release candidate
+
+- Require bearer authentication on every bridge route; reject browser origins and
+  non-local Host headers, bound JSON bodies, remove CORS and redact internal errors.
+- Send mutations once. Report communication failures as `BRIDGE_OUTCOME_UNKNOWN`.
+  Keep bounded GET retries, disable proxies/redirects and encode query parameters.
+- Install a real Python package with a console entry point and module launch;
+  publish actual tool schemas through MCP stdio and enforce JSON Schema validation.
+- Correct bridge route mappings, mutation argument names, named clip/context guards,
+  timeline creation settings and render destination handling.
+- Return `TOOL_UNAVAILABLE` for seven declared ML tools without bridge implementations.
+- Update MCP to 1.30.0 and regenerate a hash-locked, universal core dependency set.
+- Preserve user MCP settings, previous installations and unrelated startup scripts;
+  exercise installer upgrade and injected rollback on Windows CI.
+- Add installed-wheel stdio, loopback authorization and mutation regression tests,
+  multi-platform CI and publication/history secret scanning.
+- Physical integration remains pending as recorded in RELEASE_VALIDATION.md.
+
+- Resolve non-drop and 29.97/59.94 drop-frame playhead offsets, zero-based render
+  queue indices, stable job IDs and render mode. Poll accepted jobs with a
+  bounded timeout and report unknown completion without submitting another POST.
+- Verify named database, timeline, clip, album and still selections before
+  effects. Adapt Fusion exports, take operations and color/Fusion output cache.
+- Expose 36 tools by default, with 119 experimental tools explicitly opt-in
+  and seven unimplemented ML tools unavailable. Reject unsupported explicit
+  title, generator and Fusion template placement before editing.
+- Include installer, bridge, manifests and docs in the source distribution.
+  Build repeatable wheel and sdist with pinned tools and a fixed source epoch.
+
+## Initial implementation — 2026-09-15 (not a published release)
 
 ### Added
 

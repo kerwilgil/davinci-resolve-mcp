@@ -6,8 +6,11 @@ Provides tool implementations organized by Resolve domain.
 
 from collections.abc import Callable
 
+from jsonschema import Draft202012Validator
+
 from ..schemas import (
     ToolCategory,
+    ToolSchema,
     ToolMode,
     VERIFIED_TOOLS,
     get_schema,
@@ -97,82 +100,27 @@ class ToolRegistry:
                 self._validate_arguments(name, arguments, schema)
 
             # Execute handler
-            result = await handler(arguments, request_id)
+            result = await handler({**arguments, "_registry": self}, request_id)
             return result
 
         except ToolValidationError as e:
             return ToolResult.error_result(e, request_id=request_id)
         except Exception as e:
             return ToolResult.error_result(
-                ToolExecutionError(f"Tool execution failed: {e}", tool_name=name, original_error=str(e)),
+                ToolExecutionError("Tool execution failed", tool_name=name),
                 request_id=request_id,
             )
 
     def _validate_arguments(self, name: str, arguments: dict, schema: "ToolSchema") -> None:
         """Validate tool arguments against schema."""
-        # Check required fields
-        for req in schema.required:
-            if req not in arguments:
-                raise ToolValidationError(
-                    f"Missing required argument: {req}",
-                    tool_name=name,
-                    field=req,
-                )
-
-        # Basic type validation for properties
-        props = schema.parameters.get("properties", {})
-        for key, value in arguments.items():
-            if key in props:
-                prop_schema = props[key]
-                expected_type = prop_schema.get("type")
-                if expected_type and not self._check_type(value, expected_type):
-                    raise ToolValidationError(
-                        f"Argument '{key}' must be of type {expected_type}",
-                        tool_name=name,
-                        field=key,
-                        value=value,
-                    )
-
-                # Check enum values
-                if "enum" in prop_schema and value not in prop_schema["enum"]:
-                    raise ToolValidationError(
-                        f"Argument '{key}' must be one of: {prop_schema['enum']}",
-                        tool_name=name,
-                        field=key,
-                        value=value,
-                    )
-
-                # Check minimum/maximum for numbers
-                if expected_type in ("integer", "number"):
-                    if "minimum" in prop_schema and value < prop_schema["minimum"]:
-                        raise ToolValidationError(
-                            f"Argument '{key}' must be >= {prop_schema['minimum']}",
-                            tool_name=name,
-                            field=key,
-                            value=value,
-                        )
-                    if "maximum" in prop_schema and value > prop_schema["maximum"]:
-                        raise ToolValidationError(
-                            f"Argument '{key}' must be <= {prop_schema['maximum']}",
-                            tool_name=name,
-                            field=key,
-                            value=value,
-                        )
-
-    def _check_type(self, value: any, expected_type: str) -> bool:
-        """Check if value matches expected JSON schema type."""
-        type_map = {
-            "string": str,
-            "integer": int,
-            "number": (int, float),
-            "boolean": bool,
-            "array": list,
-            "object": dict,
-        }
-        expected = type_map.get(expected_type)
-        if expected is None:
-            return True
-        return isinstance(value, expected)
+        validator = Draft202012Validator({**schema.parameters, "required": schema.required})
+        error = next(validator.iter_errors(arguments), None)
+        if error:
+            raise ToolValidationError(
+                "Arguments do not match the tool schema",
+                tool_name=name,
+                field=".".join(str(part) for part in error.absolute_path) or None,
+            )
 
 
 # Tool handler function signatures

@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "davinci-resolve": {
-      "command": "python",
-      "args": ["path/to/resolve_mcp_bridge.py"]
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "davinci_mcp.server"],
+      "env": {
+        "DAVINCI_BRIDGE_TOKEN": "REPLACE_WITH_YOUR_PRIVATE_GENERATED_SECRET"
+      }
     }
   }
 }

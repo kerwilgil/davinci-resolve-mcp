@@ -85,7 +85,7 @@ EXPORT_STILLS = create_tool_schema(
     properties={
         "album_name": CommonParams.GALLERY_ALBUM,
         "output_folder": {"type": "string", "description": "Output folder path"},
-        "format": {"type": "string", "description": "Image format", "enum": ["png", "jpg", "tiff", "exr"]},
+        "format": {"type": "string", "description": "Image format", "enum": ["png", "jpg", "tiff", "dpx", "drx"]},
     },
     required=["album_name", "output_folder"],
 )

@@ -37,6 +37,7 @@ ALL_SCHEMAS.update(PROJECT_SCHEMAS)
 
 
 # Verified tools (subset that has been tested against real DaVinci Resolve)
+# Legacy declaration list. Physical validation is PENDING; membership is not test evidence.
 VERIFIED_TOOLS = [
     "get_resolve_status",
     "get_project_info",
